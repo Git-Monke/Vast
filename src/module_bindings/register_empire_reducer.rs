@@ -6,42 +6,42 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
-pub(super) struct AddArgs {
+pub(super) struct RegisterEmpireArgs {
     pub name: String,
 }
 
-impl From<AddArgs> for super::Reducer {
-    fn from(args: AddArgs) -> Self {
-        Self::Add { name: args.name }
+impl From<RegisterEmpireArgs> for super::Reducer {
+    fn from(args: RegisterEmpireArgs) -> Self {
+        Self::RegisterEmpire { name: args.name }
     }
 }
 
-impl __sdk::InModule for AddArgs {
+impl __sdk::InModule for RegisterEmpireArgs {
     type Module = super::RemoteModule;
 }
 
 #[allow(non_camel_case_types)]
-/// Extension trait for access to the reducer `add`.
+/// Extension trait for access to the reducer `register_empire`.
 ///
 /// Implemented for [`super::RemoteReducers`].
-pub trait add {
-    /// Request that the remote module invoke the reducer `add` to run as soon as possible.
+pub trait register_empire {
+    /// Request that the remote module invoke the reducer `register_empire` to run as soon as possible.
     ///
     /// This method returns immediately, and errors only if we are unable to send the request.
     /// The reducer will run asynchronously in the future,
     ///  and this method provides no way to listen for its completion status.
-    /// /// Use [`add:add_then`] to run a callback after the reducer completes.
-    fn add(&self, name: String) -> __sdk::Result<()> {
-        self.add_then(name, |_, _| {})
+    /// /// Use [`register_empire:register_empire_then`] to run a callback after the reducer completes.
+    fn register_empire(&self, name: String) -> __sdk::Result<()> {
+        self.register_empire_then(name, |_, _| {})
     }
 
-    /// Request that the remote module invoke the reducer `add` to run as soon as possible,
+    /// Request that the remote module invoke the reducer `register_empire` to run as soon as possible,
     /// registering `callback` to run when we are notified that the reducer completed.
     ///
     /// This method returns immediately, and errors only if we are unable to send the request.
     /// The reducer will run asynchronously in the future,
     ///  and its status can be observed with the `callback`.
-    fn add_then(
+    fn register_empire_then(
         &self,
         name: String,
 
@@ -51,8 +51,8 @@ pub trait add {
     ) -> __sdk::Result<()>;
 }
 
-impl add for super::RemoteReducers {
-    fn add_then(
+impl register_empire for super::RemoteReducers {
+    fn register_empire_then(
         &self,
         name: String,
 
@@ -60,6 +60,7 @@ impl add for super::RemoteReducers {
             + Send
             + 'static,
     ) -> __sdk::Result<()> {
-        self.imp.invoke_reducer_with_callback(AddArgs { name }, callback)
+        self.imp
+            .invoke_reducer_with_callback(RegisterEmpireArgs { name }, callback)
     }
 }

@@ -2,8 +2,7 @@ use eframe::egui;
 use egui::{Color32, Pos2, Sense, Vec2};
 use universe::checker::star_is_at_point;
 use universe::generator::{generate_star, star_info_at, PlanetType, StarSystem, StarType};
-use universe::resources::Material;
-use universe::ships::{compute_cost, CostBreakdown, ShipStats};
+use universe::ships::{compute_cost, ShipStats};
 
 const ZOOM_MIN: f64 = 0.1; // pixels per light-year (max zoom out)
 const ZOOM_MAX: f64 = 400.0; // pixels per light-year (max zoom in)
@@ -433,38 +432,52 @@ impl ExplorerApp {
                                 .striped(true)
                                 .show(ui, |ui| {
                                     ui.label("Component");
-                                    ui.label("Dev Credits");
-                                    ui.label("Maint/Day");
+                                    ui.label("Dev C");
+                                    ui.label("Maint C");
+                                    ui.label("Base Maint");
+                                    ui.label("Mult");
                                     ui.end_row();
 
                                     ui.label("Size");
                                     ui.label(format_large_number(cost.size_dev_credits));
                                     ui.label(format_large_number(cost.size_maint_credits));
+                                    ui.label(format_large_number(cost.size_maint_base_credits));
+                                    ui.label("-");
                                     ui.end_row();
 
                                     ui.label("Speed");
                                     ui.label(format_large_number(cost.speed_dev_credits));
                                     ui.label(format_large_number(cost.speed_maint_credits));
+                                    ui.label(format_large_number(cost.speed_maint_base_credits));
+                                    ui.label(format!("{:.2}x", cost.speed_maint_mult));
                                     ui.end_row();
 
                                     ui.label("Attack");
                                     ui.label(format_large_number(cost.attack_dev_credits));
                                     ui.label(format_large_number(cost.attack_maint_credits));
+                                    ui.label(format_large_number(cost.attack_maint_base_credits));
+                                    ui.label(format!("{:.2}x", cost.attack_maint_mult));
                                     ui.end_row();
 
                                     ui.label("Defense");
                                     ui.label(format_large_number(cost.defense_dev_credits));
                                     ui.label(format_large_number(cost.defense_maint_credits));
+                                    ui.label(format_large_number(cost.defense_maint_base_credits));
+                                    ui.label(format!("{:.2}x", cost.defense_maint_mult));
                                     ui.end_row();
 
                                     ui.label("Battery");
                                     ui.label(format_large_number(cost.battery_dev_credits));
                                     ui.label(format_large_number(cost.battery_maint_credits));
+                                    ui.label(format_large_number(cost.battery_maint_base_credits));
+                                    ui.label(format!("{:.2}x", cost.battery_maint_mult));
                                     ui.end_row();
 
                                     ui.label("Radar");
                                     ui.label(format_large_number(cost.radar_dev_credits));
                                     ui.label(format_large_number(cost.radar_maint_credits));
+                                    ui.label(format_large_number(cost.radar_maint_base_credits));
+                                    ui.label("-");
                                     ui.end_row();
 
                                     ui.label(egui::RichText::new("TOTAL").strong());
@@ -480,6 +493,8 @@ impl ExplorerApp {
                                         ))
                                         .strong(),
                                     );
+                                    ui.label("-");
+                                    ui.label("-");
                                     ui.end_row();
                                 });
                         }

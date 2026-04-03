@@ -3,14 +3,34 @@ use crate::{generator::PlanetType, hasher::point_to_random};
 // Resource seeds
 const RESOURCE_SEED: u64 = 0xAAAA_AAAA_AAAA_AAAA;
 
+/// Tag-only material species (e.g. [`Material::kind`] without caring about the `f64` payload).
+#[cfg_attr(feature = "spacetimedb", derive(spacetimedb::SpacetimeType))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaterialKind {
+    Iron,
+    Helium,
+}
+
+/// Resource amount or richness, depending on context.
+///
+/// - **Procedural planets:** `f64` is a **spawn multiplier** (richness) from [`collect_materials`].
+/// - **SpacetimeDB warehouses:** `f64` is **stored quantity** (units). Same representation, different meaning.
+#[cfg_attr(feature = "spacetimedb", derive(spacetimedb::SpacetimeType))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Material {
-    Iron(f64), // multiplier for iron
-    Helium(f64), // multiplier for helium
-               // Future materials go here...
+    Iron(f64),
+    Helium(f64),
+    // Future materials go here...
 }
 
 impl Material {
+    pub fn kind(&self) -> MaterialKind {
+        match self {
+            Material::Iron(_) => MaterialKind::Iron,
+            Material::Helium(_) => MaterialKind::Helium,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Material::Iron(_) => "Iron",

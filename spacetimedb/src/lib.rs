@@ -1,8 +1,69 @@
-use spacetimedb::{ReducerContext, Table};
+use spacetimedb::{Identity, ReducerContext, SpacetimeType, Table};
+use universe::Material;
 
-#[spacetimedb::table(accessor = person, public)]
-pub struct Person {
+/// Credits granted when an empire first registers.
+const STARTING_CREDITS: u64 = 10_000;
+const MAX_EMPIRE_NAME_LEN: usize = 64;
+
+#[derive(SpacetimeType, Clone, Debug, PartialEq)]
+pub enum BuildingKind {
+    MiningDepot,
+    Warehouse,
+    MilitaryGarrison,
+    ShipDepot,
+}
+
+/// Stable procedural planet key for hashing and logging (no `planet` table row).
+///
+/// Bit layout (lossless for `i32` coordinates and `u8` planet slot):
+/// - Bits `0..32`: `star_x` reinterpreted as `u32` (two's complement bits).
+/// - Bits `32..64`: `star_y` reinterpreted as `u32`.
+/// - Bits `64..72`: `planet_index` as `u8`.
+/// - Bits `72..128`: zero.
+#[must_use]
+pub fn planet_location_id(star_x: i32, star_y: i32, planet_index: u8) -> u128 {
+    let x = u128::from(star_x as u32);
+    let y = u128::from(star_y as u32);
+    let p = u128::from(planet_index);
+    x | (y << 32) | (p << 64)
+}
+
+#[spacetimedb::table(accessor = empire, public)]
+pub struct Empire {
+    #[primary_key]
+    identity: Identity,
+    #[unique]
     name: String,
+    credits: u64,
+}
+
+#[spacetimedb::table(
+    accessor = building,
+    public,
+    index(
+        accessor = building_by_planet_location,
+        btree(columns = [star_x, star_y, planet_index])
+    ),
+    index(
+        accessor = building_by_planet_slot,
+        btree(columns = [star_x, star_y, planet_index, slot_index])
+    ),
+)]
+pub struct Building {
+    #[primary_key]
+    #[auto_inc]
+    id: u64,
+    star_x: i32,
+    star_y: i32,
+    planet_index: u8,
+    slot_index: u8,
+    kind: BuildingKind,
+    level: u32,
+    degradation_percent: f32,
+    /// Which vein this depot targets; `f64` reserved for future rate/amount semantics.
+    mining_material: Option<Material>,
+    /// Stock per species; `f64` is quantity in units (not procedural richness).
+    warehouse_inventory: Vec<Material>,
 }
 
 #[spacetimedb::reducer(init)]
@@ -21,14 +82,37 @@ pub fn identity_disconnected(_ctx: &ReducerContext) {
 }
 
 #[spacetimedb::reducer]
-pub fn add(ctx: &ReducerContext, name: String) {
-    ctx.db.person().insert(Person { name });
-}
-
-#[spacetimedb::reducer]
-pub fn say_hello(ctx: &ReducerContext) {
-    for person in ctx.db.person().iter() {
-        log::info!("Hello, {}!", person.name);
+pub fn register_empire(ctx: &ReducerContext, name: String) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Empire name cannot be empty".to_string());
     }
-    log::info!("Hello, World!");
+    if trimmed.len() > MAX_EMPIRE_NAME_LEN {
+        return Err(format!(
+            "Empire name must be at most {} characters",
+            MAX_EMPIRE_NAME_LEN
+        ));
+    }
+
+    if ctx.db.empire().identity().find(ctx.sender()).is_some() {
+        return Err("Empire already registered for this identity".to_string());
+    }
+
+    if ctx
+        .db
+        .empire()
+        .name()
+        .find(&trimmed.to_string())
+        .is_some()
+    {
+        return Err("That empire name is already taken".to_string());
+    }
+
+    ctx.db.empire().insert(Empire {
+        identity: ctx.sender(),
+        name: trimmed.to_string(),
+        credits: STARTING_CREDITS,
+    });
+
+    Ok(())
 }

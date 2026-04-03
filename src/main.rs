@@ -1,22 +1,38 @@
 mod module_bindings;
 use module_bindings::*;
 use std::env;
+use std::sync::Once;
 
 use spacetimedb_sdk::{DbContext, Table};
 
 fn main() {
-    // The URI of the SpacetimeDB instance hosting our chat module.
     let host: String = env::var("SPACETIMEDB_HOST").unwrap_or("http://localhost:3000".to_string());
-
-    // The module name we chose when we published our module.
     let db_name: String = env::var("SPACETIMEDB_DB_NAME").unwrap_or("my-db".to_string());
 
-    // Connect to the database
+    static REGISTER_EMPIRE: Once = Once::new();
+
     let conn = DbConnection::builder()
         .with_database_name(db_name)
         .with_uri(host)
-        .on_connect(|_, _, _| {
+        .on_connect(|conn, _, _| {
             println!("Connected to SpacetimeDB");
+            conn.subscription_builder()
+                .on_applied(|ctx| {
+                    println!("Subscribed to empire and building tables");
+                    REGISTER_EMPIRE.call_once(|| {
+                        let name = env::var("EMPIRE_NAME")
+                            .unwrap_or_else(|_| "Test Empire".to_string());
+                        if let Err(e) = ctx.reducers().register_empire(name) {
+                            eprintln!("Failed to send register_empire: {:?}", e);
+                        }
+                    });
+                })
+                .on_error(|_ctx, e| {
+                    eprintln!("Subscription error: {e}");
+                })
+                .add_query(|q| q.from.empire())
+                .add_query(|q| q.from.building())
+                .subscribe();
         })
         .on_connect_error(|_ctx, e| {
             eprintln!("Connection error: {:?}", e);
@@ -27,19 +43,13 @@ fn main() {
 
     conn.run_threaded();
 
-    // Subscribe to the person table
-    conn.subscription_builder()
-        .on_applied(|_ctx| println!("Subscripted to the person table"))
-        .on_error(|_ctx, e| eprintln!("There was an error when subscring to the person table: {e}"))
-        .add_query(|q| q.from.person())
-        .subscribe();
-
-    // Register a callback for when rows are inserted into the person table
-    conn.db().person().on_insert(|_ctx, person| {
-        println!("New person: {}", person.name);
+    conn.db().empire().on_insert(|_ctx, empire| {
+        println!(
+            "Empire registered: {} — {} credits",
+            empire.name, empire.credits
+        );
     });
 
-    // Keep the main thread alive so the connection stays open
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
     }

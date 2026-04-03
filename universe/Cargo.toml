@@ -3,4 +3,10 @@ name = "universe"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+# Enables `SpacetimeType` on shared types used by the SpacetimeDB module.
+spacetimedb = ["dep:spacetimedb"]
+
 [dependencies]
+spacetimedb = { version = "2.1.0", optional = true }

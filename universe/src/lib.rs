@@ -3,3 +3,5 @@ pub mod generator;
 pub mod hasher;
 pub mod resources;
 pub mod ships;
+
+pub use resources::{Material, MaterialKind};

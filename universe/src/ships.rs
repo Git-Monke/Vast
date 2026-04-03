@@ -48,20 +48,35 @@ pub struct CostBreakdown {
     pub radar_dev_minutes: u64,
     pub total_dev_minutes: u64,
 
+    // Base maintenance costs (before multiplication)
+    pub size_maint_base_credits: u64,
+    pub speed_maint_base_credits: u64,
+    pub attack_maint_base_credits: u64,
+    pub defense_maint_base_credits: u64,
+    pub battery_maint_base_credits: u64,
+    pub radar_maint_base_credits: u64,
+
+    // Final multiplied maintenance costs for each component
     pub size_maint_credits: u64,
     pub speed_maint_credits: u64,
     pub attack_maint_credits: u64,
     pub defense_maint_credits: u64,
     pub battery_maint_credits: u64,
-    pub radar_maint_credits: u64,
+    pub radar_maint_credits: u64, // radar does not multiply with other stats
     pub total_maint_credits: u64,
+
+    // Interconnected multiplier tracking (for UI display)
+    pub speed_maint_mult: f64,
+    pub defense_maint_mult: f64,
+    pub attack_maint_mult: f64,
+    pub battery_maint_mult: f64,
 }
 
 // Size scaling (supertanker bulk economics)
 const SIZE_DEV_BASE: f64 = 50_000.0;
 const SIZE_DEV_EXP: f64 = 2.0;
 const SIZE_MAINT_BASE: f64 = 100.0;
-const SIZE_MAINT_EXP: f64 = 0.7;
+const SIZE_MAINT_EXP: f64 = 1.0; // Linear maintenance for economies of scale
 
 // Speed scaling (exponential for both)
 const SPEED_DEV_BASE: f64 = 8_000_000.0;
@@ -80,13 +95,20 @@ const DEFENSE_DEV_BASE: f64 = 25_000.0;
 const DEFENSE_MAINT_BASE: f64 = 200.0;
 
 // Battery scaling (linear)
-const BATTERY_DEV_BASE: f64 = 50_000.0;
+const BATTERY_DEV_BASE: f64 = 100_000.0;
 const BATTERY_MAINT_BASE: f64 = 100.0;
 
 // Radar scaling (linear dev, exponential maintenance)
 const RADAR_DEV_BASE: f64 = 1_000_000.0;
 const RADAR_MAINT_BASE: f64 = 10_000.0;
 const RADAR_MAINT_EXP: f64 = 2.0;
+
+// Interconnected scaling factors (Maintenance only)
+// Direct multiplicative scaling: final_cost = base_cost × (multiplier_stat / BASELINE_STAT)
+const SPEED_SIZE_MAINT_FACTOR: f64 = 1.0; // speed_maint × (size_f / 10) - 10kt baseline
+const DEFENSE_SIZE_MAINT_FACTOR: f64 = 1.0; // defense_maint × (size_f / 10)
+const ATTACK_SPEED_MAINT_FACTOR: f64 = 1.0; // attack_maint × (speed_f / 0.1) - 0.1 ly/s baseline
+const BATTERY_COMBO_MAINT_FACTOR: f64 = 1.0; // battery_maint × (size_f/10 × attack_f/1 × speed_f/0.1)
 
 // Minimum costs & Time scaling
 const MIN_DEV_COST: f64 = 1_000_000.0;
@@ -126,45 +148,71 @@ pub fn compute_cost(stats: &ShipStats) -> Result<CostBreakdown, &'static str> {
     };
     total_dev_cost = total_dev_cost.max(MIN_DEV_COST);
 
-    // Distribute the padding proportionally if we want accurate time scaling,
-    // or just lump it into the total. We'll just leave individual dev costs as is,
-    // but time will be based on the individual dev costs, scaled up slightly if padded.
-    let time_mult = TIME_SCALE_FACTOR
-        * if total_dev_cost > 0.0 && dev_padding > 0.0 {
-            total_dev_cost / (total_dev_cost - dev_padding) // scale up individual times
-        } else {
-            1.0
-        };
+    let time_mult_factor_for_individual_costs = if total_dev_cost > 0.0 && dev_padding > 0.0 {
+        total_dev_cost / (total_dev_cost - dev_padding)
+    } else {
+        1.0
+    };
 
-    // Maintenance costs
-    let size_maint = if size_f > 0.0 {
+    // Maintenance costs (Base - before multiplication)
+    let size_maint_base = if size_f > 0.0 {
         SIZE_MAINT_BASE * pow_safe(size_f, SIZE_MAINT_EXP)
     } else {
         0.0
     };
-    let speed_maint = SPEED_MAINT_BASE * pow_safe(speed_f, SPEED_MAINT_EXP);
+    let speed_maint_base = SPEED_MAINT_BASE * pow_safe(speed_f, SPEED_MAINT_EXP);
 
-    let attack_maint = if attack_f <= ATTACK_SOFT_CAP {
+    let attack_maint_base = if attack_f <= ATTACK_SOFT_CAP {
         ATTACK_MAINT_BASE * attack_f
     } else {
         ATTACK_MAINT_BASE * ATTACK_SOFT_CAP
             + ATTACK_MAINT_BASE * pow_safe(attack_f - ATTACK_SOFT_CAP, ATTACK_MAINT_EXP)
     };
 
-    let defense_maint = DEFENSE_MAINT_BASE * defense_f;
-    let battery_maint = BATTERY_MAINT_BASE * battery_f;
-    let radar_maint = RADAR_MAINT_BASE * pow_safe(radar_f, RADAR_MAINT_EXP);
+    let defense_maint_base = DEFENSE_MAINT_BASE * defense_f;
+    let battery_maint_base = BATTERY_MAINT_BASE * battery_f;
+    let radar_maint_base = RADAR_MAINT_BASE * pow_safe(radar_f, RADAR_MAINT_EXP);
 
-    let total_maint_cost =
-        size_maint + speed_maint + attack_maint + defense_maint + battery_maint + radar_maint;
+    // Apply DIRECT MULTIPLICATIVE scaling to maintenance costs
+    // Baseline: 10kt size, 0.1 ly/s speed, 1 attack
+    const BASELINE_SIZE: f64 = 10.0;
+    const BASELINE_SPEED: f64 = 0.1;
+    const BASELINE_ATTACK: f64 = 1.0;
+
+    // speed_maint multiplies with normalized size (size_f / 10)
+    let speed_maint_mult = (size_f / BASELINE_SIZE) * SPEED_SIZE_MAINT_FACTOR;
+    let speed_maint_final = speed_maint_base * speed_maint_mult;
+
+    // defense_maint multiplies with normalized size (size_f / 10)
+    let defense_maint_mult = (size_f / BASELINE_SIZE) * DEFENSE_SIZE_MAINT_FACTOR;
+    let defense_maint_final = defense_maint_base * defense_maint_mult;
+
+    // attack_maint multiplies with normalized speed (speed_f / 0.1)
+    let attack_maint_mult = (speed_f / BASELINE_SPEED) * ATTACK_SPEED_MAINT_FACTOR;
+    let attack_maint_final = attack_maint_base * attack_maint_mult;
+
+    // battery_maint multiplies with normalized size × attack × speed
+    let battery_maint_mult = (size_f / BASELINE_SIZE)
+        * (attack_f.max(1.0) / BASELINE_ATTACK)
+        * (speed_f / BASELINE_SPEED)
+        * BATTERY_COMBO_MAINT_FACTOR;
+    let battery_maint_final = battery_maint_base * battery_maint_mult;
+
+    // Total maintenance cost (size and radar are not multiplied by other stats)
+    let total_maint_cost = size_maint_base
+        + speed_maint_final
+        + attack_maint_final
+        + defense_maint_final
+        + battery_maint_final
+        + radar_maint_base;
 
     // Time calculations
-    let size_time = (size_dev * time_mult).round() as u64;
-    let speed_time = (speed_dev * time_mult).round() as u64;
-    let attack_time = (attack_dev * time_mult).round() as u64;
-    let defense_time = (defense_dev * time_mult).round() as u64;
-    let battery_time = (battery_dev * time_mult).round() as u64;
-    let radar_time = (radar_dev * time_mult).round() as u64;
+    let size_time = (size_dev * time_mult_factor_for_individual_costs).round() as u64;
+    let speed_time = (speed_dev * time_mult_factor_for_individual_costs).round() as u64;
+    let attack_time = (attack_dev * time_mult_factor_for_individual_costs).round() as u64;
+    let defense_time = (defense_dev * time_mult_factor_for_individual_costs).round() as u64;
+    let battery_time = (battery_dev * time_mult_factor_for_individual_costs).round() as u64;
+    let radar_time = (radar_dev * time_mult_factor_for_individual_costs).round() as u64;
 
     let total_time_raw = (total_dev_cost * TIME_SCALE_FACTOR).round() as u64;
     let total_time = total_time_raw.max(MIN_DEV_TIME_MINUTES);
@@ -186,12 +234,24 @@ pub fn compute_cost(stats: &ShipStats) -> Result<CostBreakdown, &'static str> {
         radar_dev_minutes: radar_time,
         total_dev_minutes: total_time,
 
-        size_maint_credits: size_maint.round() as u64,
-        speed_maint_credits: speed_maint.round() as u64,
-        attack_maint_credits: attack_maint.round() as u64,
-        defense_maint_credits: defense_maint.round() as u64,
-        battery_maint_credits: battery_maint.round() as u64,
-        radar_maint_credits: radar_maint.round() as u64,
+        size_maint_base_credits: size_maint_base.round() as u64,
+        speed_maint_base_credits: speed_maint_base.round() as u64,
+        attack_maint_base_credits: attack_maint_base.round() as u64,
+        defense_maint_base_credits: defense_maint_base.round() as u64,
+        battery_maint_base_credits: battery_maint_base.round() as u64,
+        radar_maint_base_credits: radar_maint_base.round() as u64,
+
+        size_maint_credits: size_maint_base.round() as u64, // Size is base only
+        speed_maint_credits: speed_maint_final.round() as u64,
+        attack_maint_credits: attack_maint_final.round() as u64,
+        defense_maint_credits: defense_maint_final.round() as u64,
+        battery_maint_credits: battery_maint_final.round() as u64,
+        radar_maint_credits: radar_maint_base.round() as u64, // Radar is base only
         total_maint_credits: total_maint_cost.round() as u64,
+
+        speed_maint_mult,
+        defense_maint_mult,
+        attack_maint_mult,
+        battery_maint_mult,
     })
 }
