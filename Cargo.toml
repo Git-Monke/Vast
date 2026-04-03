@@ -1,0 +1,11 @@
+[package]
+name = "vast"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+exclude = ["spacetimedb"]
+members = ["universe", "explorer"]
+
+[dependencies]
+spacetimedb-sdk = { version = "2.1.*" }

@@ -1,0 +1,48 @@
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# Cargo
+Cargo.lock
+
+# SpacetimeDB
+spacetime.local.json
+.spacetime/
+spacetimedb/.spacetime/
+
+# WASM build artifacts
+*.wasm
+pkg/
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+spacetime.log
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+.aider*
+
+.cargo
+.cursor
+.github
+.windsurfrules

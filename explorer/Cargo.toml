@@ -1,0 +1,9 @@
+[package]
+name = "explorer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+universe = { path = "../universe" }
+eframe = "0.29"
+egui = "0.29"
