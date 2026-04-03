@@ -3,6 +3,7 @@ use egui::{Color32, Pos2, Sense, Vec2};
 use universe::checker::star_is_at_point;
 use universe::generator::{generate_star, star_info_at, PlanetType, StarSystem, StarType};
 use universe::resources::Material;
+use universe::ships::{compute_cost, CostBreakdown, ShipStats};
 
 const ZOOM_MIN: f64 = 0.1; // pixels per light-year (max zoom out)
 const ZOOM_MAX: f64 = 400.0; // pixels per light-year (max zoom in)
@@ -34,26 +35,86 @@ fn visual_radius(size_solar_radii: f64, zoom: f64) -> f32 {
     r as f32
 }
 
+fn format_large_number(num: u64) -> String {
+    if num >= 1_000_000_000_000 {
+        format!("{:.2}T", num as f64 / 1_000_000_000_000.0)
+    } else if num >= 1_000_000_000 {
+        format!("{:.2}B", num as f64 / 1_000_000_000.0)
+    } else if num >= 1_000_000 {
+        format!("{:.2}M", num as f64 / 1_000_000.0)
+    } else if num >= 1_000 {
+        format!("{:.2}k", num as f64 / 1_000.0)
+    } else {
+        format!("{}", num)
+    }
+}
+
+fn format_time(minutes: u64) -> String {
+    if minutes >= 24 * 60 * 7 {
+        format!(
+            "{} weeks {} days",
+            minutes / (24 * 60 * 7),
+            (minutes % (24 * 60 * 7)) / (24 * 60)
+        )
+    } else if minutes >= 24 * 60 {
+        format!(
+            "{} days {} hours",
+            minutes / (24 * 60),
+            (minutes % (24 * 60)) / 60
+        )
+    } else if minutes >= 60 {
+        format!("{} hours {} mins", minutes / 60, minutes % 60)
+    } else {
+        format!("{} mins", minutes)
+    }
+}
+
+#[derive(PartialEq)]
+enum Tab {
+    Universe,
+    ShipBuilder,
+}
+
 struct ExplorerApp {
+    current_tab: Tab,
     camera_x: f64,
     camera_y: f64,
     zoom: f64, // pixels per light-year
     selected: Option<StarSystem>,
+    ship_stats: ShipStats,
 }
 
 impl Default for ExplorerApp {
     fn default() -> Self {
         Self {
+            current_tab: Tab::Universe,
             camera_x: 0.0,
             camera_y: 0.0,
             zoom: 14.0,
             selected: None,
+            ship_stats: ShipStats::default(),
         }
     }
 }
 
 impl eframe::App for ExplorerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.current_tab, Tab::Universe, "🌌 Universe Explorer");
+                ui.selectable_value(&mut self.current_tab, Tab::ShipBuilder, "🛠 Ship Builder");
+            });
+        });
+
+        match self.current_tab {
+            Tab::Universe => self.show_universe(ctx),
+            Tab::ShipBuilder => self.show_ship_builder(ctx),
+        }
+    }
+}
+
+impl ExplorerApp {
+    fn show_universe(&mut self, ctx: &egui::Context) {
         // ── Side panel: selected system info ────────────────────────────────
         if self.selected.is_some() {
             egui::SidePanel::right("info")
@@ -244,6 +305,191 @@ impl eframe::App for ExplorerApp {
             });
 
         ctx.request_repaint();
+    }
+
+    fn show_ship_builder(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("🛠 Ship Builder");
+            ui.separator();
+
+            ui.horizontal(|ui| {
+                if ui.button("Basic Scout").clicked() {
+                    self.ship_stats = ShipStats {
+                        size_kt: 1,
+                        speed_tenths_ly_s: 1,
+                        defense: 10,
+                        attack: 0,
+                        battery_ly: 50,
+                        radar_ly: 5,
+                    };
+                }
+                if ui.button("Medium Freighter").clicked() {
+                    self.ship_stats = ShipStats {
+                        size_kt: 100,
+                        speed_tenths_ly_s: 1,
+                        defense: 50,
+                        attack: 0,
+                        battery_ly: 100,
+                        radar_ly: 10,
+                    };
+                }
+                if ui.button("Destroyer").clicked() {
+                    self.ship_stats = ShipStats {
+                        size_kt: 50,
+                        speed_tenths_ly_s: 50,
+                        defense: 200,
+                        attack: 500,
+                        battery_ly: 100,
+                        radar_ly: 15,
+                    };
+                }
+                if ui.button("Empire Supertanker").clicked() {
+                    self.ship_stats = ShipStats {
+                        size_kt: 10_000,
+                        speed_tenths_ly_s: 1,
+                        defense: 1000,
+                        attack: 0,
+                        battery_ly: 20,
+                        radar_ly: 5,
+                    };
+                }
+            });
+            ui.add_space(10.0);
+
+            ui.columns(2, |columns| {
+                // Left Column: Stats Input
+                columns[0].group(|ui| {
+                    ui.heading("Ship Stats");
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Size (kt):");
+                        ui.add(egui::DragValue::new(&mut self.ship_stats.size_kt).speed(1));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Speed (ly/s):");
+                        let mut speed_f32 = self.ship_stats.speed_tenths_ly_s as f32 / 10.0;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut speed_f32)
+                                    .speed(0.1)
+                                    .range(0.1..=1000.0),
+                            )
+                            .changed()
+                        {
+                            self.ship_stats.speed_tenths_ly_s = (speed_f32 * 10.0).round() as u32;
+                        }
+                        if self.ship_stats.speed_tenths_ly_s < 1 {
+                            self.ship_stats.speed_tenths_ly_s = 1;
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Attack:");
+                        ui.add(egui::DragValue::new(&mut self.ship_stats.attack).speed(1));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Defense:");
+                        ui.add(egui::DragValue::new(&mut self.ship_stats.defense).speed(1));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Battery (ly):");
+                        ui.add(egui::DragValue::new(&mut self.ship_stats.battery_ly).speed(1));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Radar (ly):");
+                        ui.add(egui::DragValue::new(&mut self.ship_stats.radar_ly).speed(1));
+                    });
+                });
+
+                // Right Column: Cost Breakdown
+                columns[1].group(|ui| {
+                    ui.heading("Cost Breakdown");
+                    ui.add_space(8.0);
+
+                    match compute_cost(&self.ship_stats) {
+                        Ok(cost) => {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Development Time: {}",
+                                    format_time(cost.total_dev_minutes)
+                                ))
+                                .strong(),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Daily Maintenance: {} credits",
+                                    format_large_number(cost.total_maint_credits)
+                                ))
+                                .strong(),
+                            );
+                            ui.add_space(10.0);
+
+                            egui::Grid::new("cost_breakdown_grid")
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.label("Component");
+                                    ui.label("Dev Credits");
+                                    ui.label("Maint/Day");
+                                    ui.end_row();
+
+                                    ui.label("Size");
+                                    ui.label(format_large_number(cost.size_dev_credits));
+                                    ui.label(format_large_number(cost.size_maint_credits));
+                                    ui.end_row();
+
+                                    ui.label("Speed");
+                                    ui.label(format_large_number(cost.speed_dev_credits));
+                                    ui.label(format_large_number(cost.speed_maint_credits));
+                                    ui.end_row();
+
+                                    ui.label("Attack");
+                                    ui.label(format_large_number(cost.attack_dev_credits));
+                                    ui.label(format_large_number(cost.attack_maint_credits));
+                                    ui.end_row();
+
+                                    ui.label("Defense");
+                                    ui.label(format_large_number(cost.defense_dev_credits));
+                                    ui.label(format_large_number(cost.defense_maint_credits));
+                                    ui.end_row();
+
+                                    ui.label("Battery");
+                                    ui.label(format_large_number(cost.battery_dev_credits));
+                                    ui.label(format_large_number(cost.battery_maint_credits));
+                                    ui.end_row();
+
+                                    ui.label("Radar");
+                                    ui.label(format_large_number(cost.radar_dev_credits));
+                                    ui.label(format_large_number(cost.radar_maint_credits));
+                                    ui.end_row();
+
+                                    ui.label(egui::RichText::new("TOTAL").strong());
+                                    ui.label(
+                                        egui::RichText::new(format_large_number(
+                                            cost.total_dev_credits,
+                                        ))
+                                        .strong(),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format_large_number(
+                                            cost.total_maint_credits,
+                                        ))
+                                        .strong(),
+                                    );
+                                    ui.end_row();
+                                });
+                        }
+                        Err(e) => {
+                            ui.colored_label(Color32::RED, format!("Invalid Configuration: {}", e));
+                        }
+                    }
+                });
+            });
+        });
     }
 }
 
