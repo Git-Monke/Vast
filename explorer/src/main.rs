@@ -2,6 +2,7 @@ use eframe::egui;
 use egui::{Color32, Pos2, Sense, Vec2};
 use universe::checker::star_is_at_point;
 use universe::generator::{generate_star, star_info_at, PlanetType, StarSystem, StarType};
+use universe::resources::Material;
 
 const ZOOM_MIN: f64 = 0.1; // pixels per light-year (max zoom out)
 const ZOOM_MAX: f64 = 400.0; // pixels per light-year (max zoom in)
@@ -82,6 +83,9 @@ impl eframe::App for ExplorerApp {
                             ui.label(format!("  Temp:     {:.0} K", p.temperature_k));
                             ui.label(format!("  Slots:    {}", p.size));
                             ui.label(format!("  Richness: {:.2}×", p.richness));
+                            for res in &p.resources {
+                                ui.label(format!("  {}:  {:.2}×", res.name(), res.multiplier()));
+                            }
                         }
                     });
                     ui.add_space(4.0);

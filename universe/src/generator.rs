@@ -1,6 +1,7 @@
 use crate::{
     checker::star_is_at_point,
     hasher::{point_hash, point_to_random},
+    resources::{collect_materials, Material},
 };
 
 const STAR_TYPE_SEED: u64 = 0x1111_1111_1111_1111;
@@ -105,6 +106,7 @@ pub struct Planet {
     pub planet_type: PlanetType,
     pub size: u8,      // buildable slots, 1–10
     pub richness: f64, // multiplier, e.g. 1.5× base yield
+    pub resources: Vec<Material>,
 }
 
 macro_rules! thresh {
@@ -229,6 +231,8 @@ pub fn generate_star(x: i32, y: i32) -> Option<StarSystem> {
         let richness = r_min
             + (r_max - r_min) * point_to_random(x, y, PLANET_RICHNESS_SEED.wrapping_add(i as u64));
 
+        let resources = collect_materials(temp_k, planet_type, x, y, i);
+
         planets.push(Planet {
             index: i,
             name: String::new(),
@@ -237,6 +241,7 @@ pub fn generate_star(x: i32, y: i32) -> Option<StarSystem> {
             planet_type,
             size,
             richness,
+            resources,
         });
     }
 
