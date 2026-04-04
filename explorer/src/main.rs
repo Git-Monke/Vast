@@ -1,7 +1,14 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use eframe::egui;
 use egui::{Color32, Pos2, Sense, Vec2};
+use spacetimedb_sdk::{DbContext, Table};
+use vast_bindings::{
+    buildingQueryTableAccess, empireQueryTableAccess, register_empire, shipQueryTableAccess,
+    spawn_starter_ship, DbConnection, Empire, EmpireTableAccess, Ship, ShipLocation,
+    ShipTableAccess,
+};
 use universe::generator::{generate_star, star_info_at, PlanetType, StarSystem, StarType};
 use universe::settings::{grid_to_ly, COORD_UNITS_PER_LY};
 use universe::ships::{compute_cost, ShipStats};
@@ -109,6 +116,11 @@ fn format_time(minutes: u64) -> String {
     }
 }
 
+fn explorer_token_path() -> PathBuf {
+    let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
+    base.join("vast").join("explorer_token.txt")
+}
+
 #[derive(PartialEq)]
 enum Tab {
     Universe,
@@ -124,24 +136,19 @@ struct ExplorerApp {
     ship_stats: ShipStats,
     /// Lazy-filled map: chunk (cx, cy) → stars whose integer coords lie in that chunk.
     star_chunks: HashMap<(i32, i32), Vec<CachedStar>>,
-}
-
-impl Default for ExplorerApp {
-    fn default() -> Self {
-        Self {
-            current_tab: Tab::Universe,
-            camera_x: 0.0,
-            camera_y: 0.0,
-            zoom: 14.0,
-            selected: None,
-            ship_stats: ShipStats::default(),
-            star_chunks: HashMap::new(),
-        }
-    }
+    /// SpacetimeDB connection; [`Self::sync_session`] advances it via [`DbConnection::frame_tick`].
+    conn: Option<DbConnection>,
+    connect_error: Option<String>,
+    bootstrap_error: Option<String>,
+    empire_name_input: String,
+    my_empire: Option<Empire>,
+    my_ships: Vec<Ship>,
+    did_center_camera: bool,
 }
 
 impl eframe::App for ExplorerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.sync_session(ctx);
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.current_tab, Tab::Universe, "🌌 Universe Explorer");
@@ -157,7 +164,155 @@ impl eframe::App for ExplorerApp {
 }
 
 impl ExplorerApp {
+    fn new(cc: &eframe::CreationContext) -> Self {
+        let mut app = Self {
+            current_tab: Tab::Universe,
+            camera_x: 0.0,
+            camera_y: 0.0,
+            zoom: 14.0,
+            selected: None,
+            ship_stats: ShipStats::default(),
+            star_chunks: HashMap::new(),
+            conn: None,
+            connect_error: None,
+            bootstrap_error: None,
+            empire_name_input: String::new(),
+            my_empire: None,
+            my_ships: Vec::new(),
+            did_center_camera: false,
+        };
+        app.start_connection(cc);
+        app
+    }
+
+    fn start_connection(&mut self, cc: &eframe::CreationContext) {
+        let host =
+            std::env::var("SPACETIMEDB_HOST").unwrap_or_else(|_| "http://127.0.0.1:3000".into());
+        let db = std::env::var("SPACETIMEDB_DB_NAME").unwrap_or_else(|_| "vast".into());
+        let token_path = explorer_token_path();
+        let saved = std::fs::read_to_string(&token_path)
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let egui_ctx = cc.egui_ctx.clone();
+        let path_for_save = token_path.clone();
+        let result = DbConnection::builder()
+            .with_uri(host)
+            .with_database_name(db)
+            .with_token(saved)
+            .on_connect(move |conn, _identity, token| {
+                let _ = std::fs::create_dir_all(
+                    path_for_save
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new(".")),
+                );
+                let _ = std::fs::write(&path_for_save, token);
+                let egui_ctx = egui_ctx.clone();
+                conn.subscription_builder()
+                    .on_applied(move |_ctx| {
+                        egui_ctx.request_repaint();
+                    })
+                    .on_error(|_ctx, e| {
+                        eprintln!("subscription error: {e}");
+                    })
+                    .add_query(|q| q.from.empire())
+                    .add_query(|q| q.from.building())
+                    .add_query(|q| q.from.ship())
+                    .subscribe();
+            })
+            .on_connect_error(|_ctx, e| {
+                eprintln!("connection error: {e:?}");
+            })
+            .build();
+        match result {
+            Ok(c) => self.conn = Some(c),
+            Err(e) => self.connect_error = Some(format!("{e:?}")),
+        }
+    }
+
+    fn game_ready(&self) -> bool {
+        self.my_empire.is_some() && !self.my_ships.is_empty()
+    }
+
+    fn sync_session(&mut self, _ctx: &egui::Context) {
+        let Some(conn) = &self.conn else {
+            return;
+        };
+        let _ = conn.frame_tick();
+        let Some(id) = conn.try_identity() else {
+            return;
+        };
+        self.my_empire = conn.db().empire().iter().find(|e| e.identity == id);
+        self.my_ships.clear();
+        for s in conn.db().ship().iter() {
+            if s.owner == id {
+                self.my_ships.push(s);
+            }
+        }
+        if !self.did_center_camera {
+            if let Some(ship) = self.my_ships.first() {
+                if let ShipLocation::AtPlanet(loc) = &ship.location {
+                    self.camera_x = grid_to_ly(loc.star_x);
+                    self.camera_y = grid_to_ly(loc.star_y);
+                    self.did_center_camera = true;
+                }
+            }
+        }
+    }
+
     fn show_universe(&mut self, ctx: &egui::Context) {
+        if !self.game_ready() {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none().fill(Color32::from_rgb(4, 4, 12)))
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(80.0);
+                        ui.heading(egui::RichText::new("VAST").size(28.0));
+                        ui.add_space(12.0);
+                        ui.label("Enter your empire name (unique on this database). No password yet.");
+                        ui.add_space(8.0);
+                        if let Some(e) = &self.connect_error {
+                            ui.colored_label(Color32::RED, format!("Connection: {e}"));
+                        }
+                        if let Some(e) = &self.bootstrap_error {
+                            ui.colored_label(Color32::from_rgb(255, 180, 120), e.as_str());
+                        }
+                        ui.add_space(8.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.empire_name_input)
+                                .desired_width(280.0),
+                        );
+                        ui.add_space(12.0);
+                        if ui.button("Start").clicked() {
+                            self.bootstrap_error = None;
+                            let name = self.empire_name_input.trim().to_string();
+                            if name.is_empty() {
+                                self.bootstrap_error = Some("Enter an empire name.".into());
+                            } else if let Some(conn) = &self.conn {
+                                if let Err(e) = conn.reducers().register_empire(name) {
+                                    self.bootstrap_error =
+                                        Some(format!("Could not send register_empire: {e:?}"));
+                                } else if let Err(e) = conn.reducers().spawn_starter_ship() {
+                                    self.bootstrap_error =
+                                        Some(format!("Could not send spawn_starter_ship: {e:?}"));
+                                }
+                            } else {
+                                self.bootstrap_error =
+                                    Some("Not connected to SpacetimeDB.".into());
+                            }
+                        }
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "SPACETIMEDB_HOST / SPACETIMEDB_DB_NAME (default: vast)",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                    });
+                });
+            return;
+        }
+
         // ── Side panel: selected system info ────────────────────────────────
         if self.selected.is_some() {
             egui::SidePanel::right("info")
@@ -371,8 +526,19 @@ impl ExplorerApp {
                     egui::FontId::monospace(11.0),
                     Color32::from_gray(130),
                 );
+                let mut hud_y = 16.0;
+                if let Some(e) = &self.my_empire {
+                    painter.text(
+                        hud_origin + Vec2::new(0.0, hud_y),
+                        egui::Align2::LEFT_TOP,
+                        format!("Empire: {} — {} credits", e.name, e.credits),
+                        egui::FontId::monospace(11.0),
+                        Color32::from_rgb(180, 220, 255),
+                    );
+                    hud_y += 16.0;
+                }
                 painter.text(
-                    hud_origin + Vec2::new(0.0, 16.0),
+                    hud_origin + Vec2::new(0.0, hud_y),
                     egui::Align2::LEFT_TOP,
                     format!(
                         "Stars discovered: {}  (unique; grows as you pan into new regions)",
@@ -608,6 +774,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "VAST Explorer",
         options,
-        Box::new(|_cc| Ok(Box::new(ExplorerApp::default()))),
+        Box::new(|cc| Ok(Box::new(ExplorerApp::new(cc)))),
     )
 }

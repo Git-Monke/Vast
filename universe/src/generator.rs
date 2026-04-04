@@ -12,7 +12,7 @@ const PLANET_TYPE_SEED: u64 = 0x5555_5555_5555_5555;
 const PLANET_SIZE_SEED: u64 = 0x3333_3333_3333_3333;
 const PLANET_RICHNESS_SEED: u64 = 0x4444_4444_4444_4444;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StarType {
     Red,
     Orange,

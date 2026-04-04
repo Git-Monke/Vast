@@ -23,8 +23,8 @@ cargo run
 # View server logs
 spacetime logs vast
 
-# Regenerate client bindings after backend changes
-spacetime generate --lang rust --out-dir src/module_bindings --module-path spacetimedb
+# Regenerate client bindings after backend changes (shared by root client + explorer)
+spacetime generate --lang rust --out-dir vast-bindings/src --module-path spacetimedb
 
 # Start local SpacetimeDB server
 spacetime start
@@ -40,7 +40,8 @@ spacetime sql "SELECT * FROM person"
 vast/
 ├── spacetimedb/src/lib.rs   # Backend: SpacetimeDB tables and reducers (compiled to WASM)
 ├── src/main.rs              # Rust client: connects, subscribes, calls reducers
-├── src/module_bindings/     # Auto-generated — DO NOT edit, regenerate with spacetime generate
+├── vast-bindings/src/       # Auto-generated client SDK (mod.rs) — DO NOT edit; regenerate with spacetime generate
+├── explorer/src/            # egui galaxy map + SpacetimeDB bootstrap UI
 ├── universe/src/            # Procedural generation library (pure Rust, no SpacetimeDB dep)
 │   ├── hasher.rs            # point_hash(x, y, seed) → u64, point_to_random() → f64
 │   ├── checker.rs           # star_is_at_point(x, y) — density function for star placement

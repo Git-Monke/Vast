@@ -5,7 +5,8 @@ edition = "2021"
 
 [workspace]
 exclude = ["spacetimedb"]
-members = ["universe", "explorer"]
+members = ["universe", "explorer", "vast-bindings"]
 
 [dependencies]
 spacetimedb-sdk = { version = "2.1.*" }
+vast-bindings = { path = "vast-bindings" }

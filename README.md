@@ -1,5 +1,7 @@
 Get a SpacetimeDB Rust app running in under 5 minutes.
 
+**This repository (Vast):** generated Rust bindings live in [`vast-bindings/`](vast-bindings/) (`spacetime generate --out-dir vast-bindings/src --module-path spacetimedb`). The egui client is [`explorer/`](explorer/).
+
 ## Prerequisites
 
 - [Rust](https://www.rust-lang.org/tools/install) installed
@@ -25,7 +27,7 @@ spacetime dev --template basic-rs
 
 Your project contains both server and client code.
 
-Edit `spacetimedb/src/lib.rs` to add tables and reducers. Use the generated bindings in `src/module_bindings/` to build your client.
+Edit `spacetimedb/src/lib.rs` to add tables and reducers. In **this** repo, use the generated bindings in `vast-bindings/` (not `src/module_bindings/`). For a fresh `spacetime dev` template, bindings often live under `src/module_bindings/` as below.
 
 ```
 my-spacetime-app/

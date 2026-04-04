@@ -1,13 +1,12 @@
-mod module_bindings;
-use module_bindings::*;
 use std::env;
 use std::sync::Once;
 
 use spacetimedb_sdk::{DbContext, Table};
+use vast_bindings::*;
 
 fn main() {
     let host: String = env::var("SPACETIMEDB_HOST").unwrap_or("http://localhost:3000".to_string());
-    let db_name: String = env::var("SPACETIMEDB_DB_NAME").unwrap_or("my-db".to_string());
+    let db_name: String = env::var("SPACETIMEDB_DB_NAME").unwrap_or("vast".to_string());
 
     static REGISTER_EMPIRE: Once = Once::new();
 
@@ -24,6 +23,8 @@ fn main() {
                             .unwrap_or_else(|_| "Test Empire".to_string());
                         if let Err(e) = ctx.reducers().register_empire(name) {
                             eprintln!("Failed to send register_empire: {:?}", e);
+                        } else if let Err(e) = ctx.reducers().spawn_starter_ship() {
+                            eprintln!("Failed to send spawn_starter_ship: {:?}", e);
                         }
                     });
                 })

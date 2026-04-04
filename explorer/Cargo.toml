@@ -5,5 +5,8 @@ edition = "2021"
 
 [dependencies]
 universe = { path = "../universe" }
+vast-bindings = { path = "../vast-bindings" }
+spacetimedb-sdk = { version = "2.1.*" }
 eframe = "0.29"
 egui = "0.29"
+dirs = "5"
