@@ -14,6 +14,8 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- SpacetimeDB **`BuildingKind`**: new variant **`SalesDepot`** (government sink / instant exchange vendor; no new `Building` columns). Enum changes may require republishing with `--clear-database` if not auto-migrated. Sell reducer and pricing are not implemented yet.
+
 - SpacetimeDB `ship` schema: new **`cargo`** column (`Vec<Material>`). Republish existing databases with `--clear-database` or run a migration if you keep data (no migration reducer added here).
 
 - Procedural star density: **[`PLANE_DENSITY_SCALE`](universe/src/settings.rs)** set to **10⁻⁶** (2D grid; ~1000× sparser than the previous 10⁻³ factor) so expected galaxy population stays in a playable range.

@@ -14,6 +14,8 @@ pub enum BuildingKind {
 
     MilitaryGarrison,
 
+    SalesDepot,
+
     ShipDepot,
 }
 
