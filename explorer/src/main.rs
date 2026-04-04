@@ -5,13 +5,16 @@ use std::sync::mpsc;
 use eframe::egui;
 use egui::{Color32, Pos2, Sense, Vec2};
 use spacetimedb_sdk::{DbContext, Table};
+use spacetimedb_sdk::Timestamp;
 use vast_bindings::{
-    buildingQueryTableAccess, empireQueryTableAccess, register_empire, shipQueryTableAccess,
-    spawn_starter_ship, DbConnection, Empire, EmpireTableAccess, Material, Ship, ShipAttackMode,
-    ShipLocation, ShipTableAccess,
+    buildingQueryTableAccess, empireQueryTableAccess, order_warp, register_empire,
+    shipQueryTableAccess, spawn_starter_ship, DbConnection, Empire, EmpireTableAccess, Material,
+    Ship, ShipAttackMode, ShipLocation, ShipTableAccess,
 };
 use universe::generator::{generate_star, star_info_at, PlanetType, StarSystem, StarType};
+use universe::parse_star_id;
 use universe::settings::{grid_to_ly, COORD_UNITS_PER_LY};
+use universe::star_display_id;
 use universe::ships::{compute_cost, ShipStats};
 
 const ZOOM_MIN: f64 = 0.1; // pixels per light-year (max zoom out)
@@ -115,6 +118,23 @@ fn format_material_line(m: &Material) -> String {
     }
 }
 
+fn jump_ready_line(ship: &Ship) -> Option<String> {
+    match &ship.location {
+        ShipLocation::AtStar(_) => {
+            let now = Timestamp::now();
+            let n = now.to_micros_since_unix_epoch();
+            let r = ship.jump_ready_at.to_micros_since_unix_epoch();
+            if n >= r {
+                Some("Battery: ready to warp".to_string())
+            } else {
+                let sec = ((r - n) / 1_000_000).max(1);
+                Some(format!("Battery: charging (~{sec}s to jump)"))
+            }
+        }
+        _ => None,
+    }
+}
+
 fn format_time(minutes: u64) -> String {
     if minutes >= 24 * 60 * 7 {
         format!(
@@ -135,9 +155,31 @@ fn format_time(minutes: u64) -> String {
     }
 }
 
-fn explorer_token_path() -> PathBuf {
+fn explorer_token_dir() -> PathBuf {
     let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
-    base.join("vast").join("explorer_token.txt")
+    base.join("vast").join("explorer_tokens")
+}
+
+/// Token file for a given empire name (trimmed). Same name → same file → same SpacetimeDB identity.
+fn explorer_token_path_for_empire_name(name: &str) -> PathBuf {
+    let trimmed = name.trim();
+    let mut safe: String = trimmed
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else if c.is_whitespace() {
+                '_'
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        safe = "unnamed".into();
+    }
+    safe.truncate(200);
+    explorer_token_dir().join(format!("{safe}.txt"))
 }
 
 #[derive(PartialEq)]
@@ -161,7 +203,17 @@ struct ExplorerApp {
     bootstrap_error: Option<String>,
     bootstrap_err_tx: mpsc::Sender<String>,
     bootstrap_err_rx: mpsc::Receiver<String>,
+    /// Async messages from reducers (e.g. warp), shown in the star panel.
+    toast_tx: mpsc::Sender<String>,
+    toast_rx: mpsc::Receiver<String>,
+    toast_message: Option<String>,
+    /// Destination star ID for [`order_warp`] (paste or "Use for warp" from current selection).
+    warp_star_id_input: String,
+    /// egui context for [`Self::start_connection`] (subscriptions need `request_repaint`).
+    egui_ctx: egui::Context,
     empire_name_input: String,
+    /// Set after a successful **Connect** — `register_empire` uses this so it matches the token file.
+    session_empire_name: Option<String>,
     my_empire: Option<Empire>,
     my_ships: Vec<Ship>,
     did_center_camera: bool,
@@ -179,6 +231,14 @@ impl eframe::App for ExplorerApp {
             bootstrap_msgs += 1;
         }
         if bootstrap_msgs > 0 {
+            ctx.request_repaint();
+        }
+        let mut toast_msgs = 0u32;
+        while let Ok(msg) = self.toast_rx.try_recv() {
+            self.toast_message = Some(msg);
+            toast_msgs += 1;
+        }
+        if toast_msgs > 0 {
             ctx.request_repaint();
         }
         self.sync_session(ctx);
@@ -199,7 +259,8 @@ impl eframe::App for ExplorerApp {
 impl ExplorerApp {
     fn new(cc: &eframe::CreationContext) -> Self {
         let (bootstrap_err_tx, bootstrap_err_rx) = mpsc::channel();
-        let mut app = Self {
+        let (toast_tx, toast_rx) = mpsc::channel();
+        let app = Self {
             current_tab: Tab::Universe,
             camera_x: 0.0,
             camera_y: 0.0,
@@ -212,26 +273,33 @@ impl ExplorerApp {
             bootstrap_error: None,
             bootstrap_err_tx,
             bootstrap_err_rx,
+            toast_tx,
+            toast_rx,
+            toast_message: None,
+            warp_star_id_input: String::new(),
+            egui_ctx: cc.egui_ctx.clone(),
             empire_name_input: String::new(),
+            session_empire_name: None,
             my_empire: None,
             my_ships: Vec::new(),
             did_center_camera: false,
             selected_ship_id: None,
             prev_selected_star: None,
         };
-        app.start_connection(cc);
         app
     }
 
-    fn start_connection(&mut self, cc: &eframe::CreationContext) {
+    /// Connect using the saved token for `empire_name` if present; otherwise a new anonymous identity
+    /// (then register with **Start**). Token is written on successful connect.
+    fn start_connection(&mut self, empire_name: &str) {
         let host =
             std::env::var("SPACETIMEDB_HOST").unwrap_or_else(|_| "http://127.0.0.1:3000".into());
         let db = std::env::var("SPACETIMEDB_DB_NAME").unwrap_or_else(|_| "vast".into());
-        let token_path = explorer_token_path();
+        let token_path = explorer_token_path_for_empire_name(empire_name);
         let saved = std::fs::read_to_string(&token_path)
             .ok()
             .filter(|s| !s.trim().is_empty());
-        let egui_ctx = cc.egui_ctx.clone();
+        let egui_ctx = self.egui_ctx.clone();
         let path_for_save = token_path.clone();
         let result = DbConnection::builder()
             .with_uri(host)
@@ -262,7 +330,10 @@ impl ExplorerApp {
             })
             .build();
         match result {
-            Ok(c) => self.conn = Some(c),
+            Ok(c) => {
+                self.session_empire_name = Some(empire_name.trim().to_string());
+                self.conn = Some(c);
+            }
             Err(e) => self.connect_error = Some(format!("{e:?}")),
         }
     }
@@ -312,7 +383,10 @@ impl ExplorerApp {
                         ui.add_space(80.0);
                         ui.heading(egui::RichText::new("VAST").size(28.0));
                         ui.add_space(12.0);
-                        ui.label("Enter your empire name (unique on this database). No password yet.");
+                        ui.label("Enter your empire name, then Connect.");
+                        ui.label(
+                            "Same name as before loads that empire; a new name creates a new one.",
+                        );
                         ui.add_space(8.0);
                         if let Some(e) = &self.connect_error {
                             ui.colored_label(Color32::RED, format!("Connection: {e}"));
@@ -326,9 +400,23 @@ impl ExplorerApp {
                                 .desired_width(280.0),
                         );
                         ui.add_space(12.0);
-                        if ui.button("Start").clicked() {
+                        if self.conn.is_none() {
+                            if ui.button("Connect").clicked() {
+                                self.bootstrap_error = None;
+                                self.connect_error = None;
+                                let name = self.empire_name_input.trim().to_string();
+                                if name.is_empty() {
+                                    self.bootstrap_error = Some("Enter an empire name.".into());
+                                } else {
+                                    self.start_connection(&name);
+                                }
+                            }
+                        } else if ui.button("Start").clicked() {
                             self.bootstrap_error = None;
-                            let name = self.empire_name_input.trim().to_string();
+                            let name = self
+                                .session_empire_name
+                                .clone()
+                                .unwrap_or_else(|| self.empire_name_input.trim().to_string());
                             if name.is_empty() {
                                 self.bootstrap_error = Some("Enter an empire name.".into());
                             } else if let Some(conn) = &self.conn {
@@ -368,6 +456,14 @@ impl ExplorerApp {
                                     Some("Not connected to SpacetimeDB.".into());
                             }
                         }
+                        if self.conn.is_some() && !self.game_ready() {
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new("Connected — Start registers your empire and ship (first time only).")
+                                    .small()
+                                    .weak(),
+                            );
+                        }
                         ui.add_space(8.0);
                         ui.label(
                             egui::RichText::new(
@@ -393,6 +489,20 @@ impl ExplorerApp {
                         grid_to_ly(sys.x),
                         grid_to_ly(sys.y)
                     ));
+                    let sid = star_display_id(sys.x, sys.y);
+                    ui.horizontal(|ui| {
+                        ui.label("Star ID:");
+                        ui.monospace(&sid);
+                        if ui.button("Copy").clicked() {
+                            ctx.copy_text(sid.clone());
+                        }
+                        if ui.button("Use for warp").clicked() {
+                            self.warp_star_id_input = sid.clone();
+                        }
+                    });
+                    if let Some(ref t) = self.toast_message {
+                        ui.colored_label(Color32::from_rgb(200, 220, 255), t.as_str());
+                    }
                     ui.label(format!("Type:  {:?}", sys.star_type));
                     ui.label(format!("Temp:  {:.0} K", sys.star_type.temperature_k()));
                     ui.label(format!("Size:  {:.4} R☉", sys.star_size_solar_radii));
@@ -470,6 +580,13 @@ impl ExplorerApp {
                                         match &ship.location {
                                             ShipLocation::AtStar(_) => {
                                                 ui.label("Location: in star system");
+                                                if let Some(j) = jump_ready_line(ship) {
+                                                    ui.label(
+                                                        egui::RichText::new(j)
+                                                            .small()
+                                                            .color(Color32::from_rgb(180, 200, 140)),
+                                                    );
+                                                }
                                             }
                                             ShipLocation::InTransit(t) => {
                                                 ui.label(format!(
@@ -519,6 +636,54 @@ impl ExplorerApp {
                                 }
                             });
                     }
+                    ui.separator();
+                    ui.heading("Warp");
+                    ui.label("Select a ship in the list above, paste a destination Star ID, then order warp.");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.warp_star_id_input)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("e.g. AA-1000-1000 or !500000,-300000"),
+                    );
+                    ui.horizontal(|ui| {
+                        let can_warp = self.selected_ship_id.is_some() && self.conn.is_some();
+                        if ui
+                            .add_enabled(can_warp, egui::Button::new("Warp to this ID"))
+                            .clicked()
+                        {
+                            self.toast_message = None;
+                            if let Some(ship_id) = self.selected_ship_id {
+                                if let Some((dx, dy)) = parse_star_id(self.warp_star_id_input.trim())
+                                {
+                                    if let Some(conn) = &self.conn {
+                                        let tx = self.toast_tx.clone();
+                                        if let Err(e) =
+                                            conn.reducers().order_warp_then(ship_id, dx, dy, {
+                                                move |_, res| {
+                                                    let msg = match res {
+                                                        Ok(Ok(())) => {
+                                                            "Warp ordered.".to_string()
+                                                        }
+                                                        Ok(Err(err)) => format!("Warp: {err}"),
+                                                        Err(err) => {
+                                                            format!("Warp failed: {err:?}")
+                                                        }
+                                                    };
+                                                    let _ = tx.send(msg);
+                                                }
+                                            })
+                                        {
+                                            self.toast_message =
+                                                Some(format!("Could not send warp: {e:?}"));
+                                        }
+                                    }
+                                } else {
+                                    self.toast_message = Some(
+                                        "Invalid star ID — check format.".to_string(),
+                                    );
+                                }
+                            }
+                        }
+                    });
                     ui.separator();
                     ui.label(format!("{} planet(s)", sys.planets.len()));
                     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -720,6 +885,22 @@ impl ExplorerApp {
                                 [a, b],
                                 egui::Stroke::new(1.0, ship_line),
                             );
+                            let now = Timestamp::now();
+                            let n = now.to_micros_since_unix_epoch();
+                            let d0 = t.depart_at.to_micros_since_unix_epoch();
+                            let d1 = t.arrive_at.to_micros_since_unix_epoch();
+                            let frac = if d1 <= d0 {
+                                1.0_f32
+                            } else {
+                                (((n - d0) as f64 / (d1 - d0) as f64) as f32).clamp(0.0, 1.0)
+                            };
+                            let p = a.lerp(b, frac);
+                            painter.circle_stroke(
+                                p,
+                                ship_marker_r,
+                                egui::Stroke::new(1.8, ship_accent),
+                            );
+                            painter.circle_filled(p, ship_marker_r * 0.35, ship_accent);
                         }
                     }
                 }

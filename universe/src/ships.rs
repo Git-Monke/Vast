@@ -8,6 +8,16 @@ pub fn travel_duration_secs(distance_ly: f64, speed_lys: f64) -> f64 {
     distance_ly / speed_lys
 }
 
+/// Wall-clock seconds to recharge jump battery while docked:  
+/// `0.1 * size_kt * battery_ly / (star_temp_k / 1000)`  
+/// Hotter stars recharge faster (smaller time).
+#[inline]
+#[must_use]
+pub fn battery_charge_duration_secs(size_kt: u32, battery_ly: u32, star_temp_k: f64) -> f64 {
+    let t = star_temp_k.max(1.0);
+    0.1 * f64::from(size_kt) * f64::from(battery_ly) / (t / 1000.0)
+}
+
 #[cfg_attr(feature = "spacetimedb", derive(spacetimedb::SpacetimeType))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShipAttackMode {
@@ -57,10 +67,10 @@ impl Default for ShipStats {
     fn default() -> Self {
         Self {
             size_kt: 10,
-            speed_lys: 0.1,
+            speed_lys: 2.0,
             defense: 10,
             attack: 0,
-            battery_ly: 10,
+            battery_ly: 50,
             radar_ly: 5,
         }
     }

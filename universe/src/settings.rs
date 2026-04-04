@@ -42,6 +42,15 @@ pub fn distance_from_origin_ly(x: i32, y: i32) -> f64 {
     (x_ly * x_ly + y_ly * y_ly).sqrt()
 }
 
+/// Straight-line distance in light-years between two grid cells (tenths of a ly per step).
+#[inline]
+#[must_use]
+pub fn distance_between_cells_ly(ax: i32, ay: i32, bx: i32, by: i32) -> f64 {
+    let dx = grid_to_ly(bx - ax);
+    let dy = grid_to_ly(by - ay);
+    (dx * dx + dy * dy).sqrt()
+}
+
 /// Mean inter-star spacing in ly at radius `r_ly` from the core.
 #[inline]
 pub fn mean_spacing_at_radius_ly(r_ly: f64) -> f64 {

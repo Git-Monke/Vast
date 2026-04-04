@@ -1,8 +1,12 @@
-use spacetimedb::{Identity, ReducerContext, SpacetimeType, Table};
+use spacetimedb::{
+    Identity, ReducerContext, ScheduleAt, SpacetimeType, Table, TimeDuration, Timestamp,
+};
 use universe::generator::{generate_star, star_info_at, StarType};
-use universe::settings::COORD_UNITS_PER_LY;
+use universe::settings::{distance_between_cells_ly, COORD_UNITS_PER_LY};
 use universe::Material;
-use universe::{ShipAtStar, ShipAttackMode, ShipLocation, ShipStats};
+use universe::{
+    ShipAtStar, ShipAttackMode, ShipInTransit, ShipLocation, ShipStats,
+};
 
 /// Credits granted when an empire first registers.
 const STARTING_CREDITS: u64 = 10_000;
@@ -29,7 +33,7 @@ pub enum BuildingKind {
 
 /// Stable procedural planet key for hashing and logging (no `planet` table row).
 ///
-/// Bit layout (lossless for `i32` coordinates and `u8` planet slot):
+/// Bit layout (lossless for `i32` coordinates and `u8` planet sloAt):
 /// - Bits `0..32`: `star_x` reinterpreted as `u32` (two's complement bits).
 /// - Bits `32..64`: `star_y` reinterpreted as `u32`.
 /// - Bits `64..72`: `planet_index` as `u8`.
@@ -41,7 +45,7 @@ pub fn planet_location_id(star_x: i32, star_y: i32, planet_index: u8) -> u128 {
     let p = u128::from(planet_index);
     x | (y << 32) | (p << 64)
 }
-
+A
 #[spacetimedb::table(accessor = empire, public)]
 pub struct Empire {
     #[primary_key]
@@ -53,7 +57,7 @@ pub struct Empire {
 
 #[spacetimedb::table(
     accessor = building,
-    public,
+    public,A
     index(
         accessor = building_by_planet_location,
         btree(columns = [star_x, star_y, planet_index])
@@ -80,7 +84,7 @@ pub struct Building {
     /// Stock per species; `f64` is quantity in units (not procedural richness).
     warehouse_inventory: Vec<Material>,
     /// Military garrison only: empire that operates this garrison. Must be `None` for other kinds.
-    owner: Option<Identity>,
+    owner: Option<Identity>,A
     /// Military garrison only: same semantics as [`Ship::attack_mode`]. Must be `None` for other kinds.
     attack_mode: Option<ShipAttackMode>,
 }
@@ -101,6 +105,20 @@ pub struct Ship {
     cargo: Vec<Material>,
     attack_mode: ShipAttackMode,
     location: ShipLocation,
+    /// Earliest time this ship may initiate a warp while docked (`ShipLocation::AtStar`). Ignored while `InTransit`.
+    jump_ready_at: Timestamp,
+}
+
+/// One-shot timer to complete an in-flight warp at `arrive_at`.
+#[spacetimedb::table(accessor = warp_job, scheduled(complete_warp))]
+pub struct WarpJob {
+    #[primary_key]
+    #[auto_inc]
+    scheduled_id: u64,
+    scheduled_at: ScheduleAt,
+    ship_id: u64,
+    to_star_x: i32,
+    to_star_y: i32,
 }
 
 #[spacetimedb::reducer(init)]
@@ -118,7 +136,7 @@ pub fn identity_disconnected(_ctx: &ReducerContext) {
     // Called everytime a client disconnects
 }
 
-#[spacetimedb::reducer]
+#[spacetimedb::reducer]A
 pub fn register_empire(ctx: &ReducerContext, name: String) -> Result<(), String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -222,6 +240,23 @@ fn find_empty_red_dwarf_starter(ctx: &ReducerContext) -> Option<(i32, i32)> {
     None
 }
 
+/// When docked: `jump_ready_at` after battery recharge at this star's temperature.
+fn jump_ready_after_charge_at_star(
+    ctx: &ReducerContext,
+    star_x: i32,
+    star_y: i32,
+    stats: &ShipStats,
+) -> Option<Timestamp> {
+    let (st, _) = star_info_at(star_x, star_y)?;
+    let secs = universe::ships::battery_charge_duration_secs(
+        stats.size_kt,
+        stats.battery_ly,
+        st.temperature_k(),
+    );
+    let micros = (secs * 1_000_000.0).round() as i64;
+    Some(ctx.timestamp + TimeDuration::from_micros(micros))
+}
+
 #[spacetimedb::reducer]
 pub fn spawn_starter_ship(ctx: &ReducerContext) -> Result<(), String> {
     if ctx.db.empire().identity().find(ctx.sender()).is_none() {
@@ -239,13 +274,120 @@ pub fn spawn_starter_ship(ctx: &ReducerContext) -> Result<(), String> {
         );
     };
 
+    let stats = ShipStats::default();
+    // Starter ship may warp immediately (no initial battery charge wait at spawn).
+    let jump_ready_at = ctx.timestamp;
+
     ctx.db.ship().insert(Ship {
         id: 0,
         owner: ctx.sender(),
-        stats: ShipStats::default(),
+        stats,
         cargo: vec![],
         attack_mode: ShipAttackMode::Defend,
         location: ShipLocation::AtStar(ShipAtStar { star_x, star_y }),
+        jump_ready_at,
+    });
+
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn order_warp(
+    ctx: &ReducerContext,
+    ship_id: u64,
+    dest_star_x: i32,
+    dest_star_y: i32,
+) -> Result<(), String> {
+    let ship = ctx
+        .db
+        .ship()
+        .id()
+        .find(&ship_id)
+        .ok_or_else(|| "Ship not found".to_string())?;
+    if ship.owner != ctx.sender() {
+        return Err("Not your ship".to_string());
+    }
+
+    let ShipLocation::AtStar(from) = &ship.location else {
+        return Err("Ship is not docked at a star".to_string());
+    };
+
+    if ctx.timestamp < ship.jump_ready_at {
+        return Err("Jump battery still charging".to_string());
+    }
+
+    if star_info_at(dest_star_x, dest_star_y).is_none() {
+        return Err("No star at destination".to_string());
+    }
+
+    if from.star_x == dest_star_x && from.star_y == dest_star_y {
+        return Err("Already at destination".to_string());
+    }
+
+    let dist_ly = distance_between_cells_ly(from.star_x, from.star_y, dest_star_x, dest_star_y);
+    if dist_ly > ship.stats.battery_ly as f64 {
+        return Err(format!(
+            "Destination is {:.2} ly away; battery range is {} ly",
+            dist_ly, ship.stats.battery_ly
+        ));
+    }
+
+    let travel_secs = universe::ships::travel_duration_secs(dist_ly, ship.stats.speed_lys);
+    let travel_micros = (travel_secs * 1_000_000.0).round() as i64;
+    let depart = ctx.timestamp;
+    let arrive = depart + TimeDuration::from_micros(travel_micros);
+
+    ctx.db.warp_job().insert(WarpJob {
+        scheduled_id: 0,
+        scheduled_at: arrive.into(),
+        ship_id,
+        to_star_x: dest_star_x,
+        to_star_y: dest_star_y,
+    });
+
+    ctx.db.ship().id().update(Ship {
+        location: ShipLocation::InTransit(ShipInTransit {
+            from_star_x: from.star_x,
+            from_star_y: from.star_y,
+            to_star_x: dest_star_x,
+            to_star_y: dest_star_y,
+            depart_at: depart,
+            arrive_at: arrive,
+        }),
+        jump_ready_at: Timestamp::UNIX_EPOCH,
+        ..ship
+    });
+
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn complete_warp(ctx: &ReducerContext, job: WarpJob) -> Result<(), String> {
+    let Some(ship) = ctx.db.ship().id().find(&job.ship_id) else {
+        return Ok(());
+    };
+
+    let ShipLocation::InTransit(t) = &ship.location else {
+        return Ok(());
+    };
+
+    if t.to_star_x != job.to_star_x || t.to_star_y != job.to_star_y {
+        return Ok(());
+    }
+
+    let Some(jump_ready_at) =
+        jump_ready_after_charge_at_star(ctx, job.to_star_x, job.to_star_y, &ship.stats)
+    else {
+        return Ok(());
+    };
+
+    ctx.db.ship().id().update(Ship {
+        location: ShipLocation::AtStar(ShipAtStar {
+            star_x: job.to_star_x,
+            star_y: job.to_star_y,
+        }),
+        jump_ready_at,
+        ..ship
     });
 
     Ok(())
