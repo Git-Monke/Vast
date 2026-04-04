@@ -4,6 +4,7 @@
 #![allow(unused, clippy::all)]
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
+use super::material_type::Material;
 use super::ship_attack_mode_type::ShipAttackMode;
 use super::ship_location_type::ShipLocation;
 use super::ship_stats_type::ShipStats;
@@ -14,6 +15,7 @@ pub struct Ship {
     pub id: u64,
     pub owner: __sdk::Identity,
     pub stats: ShipStats,
+    pub cargo: Vec<Material>,
     pub attack_mode: ShipAttackMode,
     pub location: ShipLocation,
 }
@@ -29,6 +31,7 @@ pub struct ShipCols {
     pub id: __sdk::__query_builder::Col<Ship, u64>,
     pub owner: __sdk::__query_builder::Col<Ship, __sdk::Identity>,
     pub stats: __sdk::__query_builder::Col<Ship, ShipStats>,
+    pub cargo: __sdk::__query_builder::Col<Ship, Vec<Material>>,
     pub attack_mode: __sdk::__query_builder::Col<Ship, ShipAttackMode>,
     pub location: __sdk::__query_builder::Col<Ship, ShipLocation>,
 }
@@ -40,6 +43,7 @@ impl __sdk::__query_builder::HasCols for Ship {
             id: __sdk::__query_builder::Col::new(table_name, "id"),
             owner: __sdk::__query_builder::Col::new(table_name, "owner"),
             stats: __sdk::__query_builder::Col::new(table_name, "stats"),
+            cargo: __sdk::__query_builder::Col::new(table_name, "cargo"),
             attack_mode: __sdk::__query_builder::Col::new(table_name, "attack_mode"),
             location: __sdk::__query_builder::Col::new(table_name, "location"),
         }

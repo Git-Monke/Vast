@@ -83,6 +83,9 @@ pub struct Ship {
     id: u64,
     owner: Identity,
     stats: ShipStats,
+    /// Hold contents; `f64` on each [`Material`] variant is quantity (units), same as [`Building::warehouse_inventory`].
+    /// Total load must stay within [`ShipStats::size_kt`] when reducers enforce logistics.
+    cargo: Vec<Material>,
     attack_mode: ShipAttackMode,
     location: ShipLocation,
 }

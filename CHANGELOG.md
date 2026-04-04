@@ -14,6 +14,8 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- SpacetimeDB `ship` schema: new **`cargo`** column (`Vec<Material>`). Republish existing databases with `--clear-database` or run a migration if you keep data (no migration reducer added here).
+
 - Procedural star density: **[`PLANE_DENSITY_SCALE`](universe/src/settings.rs)** set to **10⁻⁶** (2D grid; ~1000× sparser than the previous 10⁻³ factor) so expected galaxy population stays in a playable range.
 
 - SpacetimeDB `building`: optional **`owner`** (`Option<Identity>`) and **`attack_mode`** (`Option<ShipAttackMode>`) for **military garrisons** only; other building kinds use `None`. Index `building_by_garrison_owner` on `owner`. Reducers do not enforce garrison invariants yet.
@@ -29,7 +31,7 @@ All notable changes to this project will be documented in this file.
 - SpacetimeDB `empire` table: `identity` (primary key), unique `name`, and `credits` (starting balance on registration).
 - `register_empire` reducer to create an empire once per identity with validated name and starting credits.
 - Root client (`src/main.rs`) subscribes to `empire`, registers via `EMPIRE_NAME` (default `Test Empire`), and logs new empire rows.
-- SpacetimeDB `ship` table: `owner`, [`ShipStats`](universe/src/ships.rs), [`ShipAttackMode`](universe/src/ships.rs), [`ShipLocation`](universe/src/ships.rs) (`AtPlanet` / `InTransit` with timestamps). Index `ship_by_owner`. No spawn/warp reducers yet.
+- SpacetimeDB `ship` table: `owner`, [`ShipStats`](universe/src/ships.rs) (includes `size_kt` capacity), **`cargo`** (`Vec<Material>` hold inventory, same quantity semantics as `building.warehouse_inventory`; capacity enforcement deferred to future reducers), [`ShipAttackMode`](universe/src/ships.rs), [`ShipLocation`](universe/src/ships.rs) (`AtPlanet` / `InTransit` with timestamps). Index `ship_by_owner`. No spawn/warp reducers yet.
 - [`travel_duration_secs`](universe/src/ships.rs): `duration = distance_ly / speed_lys` using [`ShipStats::speed_lys`](universe/src/ships.rs) (light-years per second, `f64`).
 
 ### Removed
