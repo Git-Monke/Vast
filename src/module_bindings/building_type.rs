@@ -6,6 +6,7 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 use super::building_kind_type::BuildingKind;
 use super::material_type::Material;
+use super::ship_attack_mode_type::ShipAttackMode;
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
@@ -20,6 +21,8 @@ pub struct Building {
     pub degradation_percent: f32,
     pub mining_material: Option<Material>,
     pub warehouse_inventory: Vec<Material>,
+    pub owner: Option<__sdk::Identity>,
+    pub attack_mode: Option<ShipAttackMode>,
 }
 
 impl __sdk::InModule for Building {
@@ -40,6 +43,8 @@ pub struct BuildingCols {
     pub degradation_percent: __sdk::__query_builder::Col<Building, f32>,
     pub mining_material: __sdk::__query_builder::Col<Building, Option<Material>>,
     pub warehouse_inventory: __sdk::__query_builder::Col<Building, Vec<Material>>,
+    pub owner: __sdk::__query_builder::Col<Building, Option<__sdk::Identity>>,
+    pub attack_mode: __sdk::__query_builder::Col<Building, Option<ShipAttackMode>>,
 }
 
 impl __sdk::__query_builder::HasCols for Building {
@@ -62,6 +67,8 @@ impl __sdk::__query_builder::HasCols for Building {
                 table_name,
                 "warehouse_inventory",
             ),
+            owner: __sdk::__query_builder::Col::new(table_name, "owner"),
+            attack_mode: __sdk::__query_builder::Col::new(table_name, "attack_mode"),
         }
     }
 }
@@ -71,6 +78,7 @@ impl __sdk::__query_builder::HasCols for Building {
 /// Provides typed access to indexed columns for query building.
 pub struct BuildingIxCols {
     pub id: __sdk::__query_builder::IxCol<Building, u64>,
+    pub owner: __sdk::__query_builder::IxCol<Building, Option<__sdk::Identity>>,
 }
 
 impl __sdk::__query_builder::HasIxCols for Building {
@@ -78,6 +86,7 @@ impl __sdk::__query_builder::HasIxCols for Building {
     fn ix_cols(table_name: &'static str) -> Self::IxCols {
         BuildingIxCols {
             id: __sdk::__query_builder::IxCol::new(table_name, "id"),
+            owner: __sdk::__query_builder::IxCol::new(table_name, "owner"),
         }
     }
 }

@@ -315,7 +315,7 @@ impl ExplorerApp {
                 if ui.button("Basic Scout").clicked() {
                     self.ship_stats = ShipStats {
                         size_kt: 1,
-                        speed_tenths_ly_s: 1,
+                        speed_lys: 0.1,
                         defense: 10,
                         attack: 0,
                         battery_ly: 50,
@@ -325,7 +325,7 @@ impl ExplorerApp {
                 if ui.button("Medium Freighter").clicked() {
                     self.ship_stats = ShipStats {
                         size_kt: 100,
-                        speed_tenths_ly_s: 1,
+                        speed_lys: 0.1,
                         defense: 50,
                         attack: 0,
                         battery_ly: 100,
@@ -335,7 +335,7 @@ impl ExplorerApp {
                 if ui.button("Destroyer").clicked() {
                     self.ship_stats = ShipStats {
                         size_kt: 50,
-                        speed_tenths_ly_s: 50,
+                        speed_lys: 5.0,
                         defense: 200,
                         attack: 500,
                         battery_ly: 100,
@@ -345,7 +345,7 @@ impl ExplorerApp {
                 if ui.button("Empire Supertanker").clicked() {
                     self.ship_stats = ShipStats {
                         size_kt: 10_000,
-                        speed_tenths_ly_s: 1,
+                        speed_lys: 0.1,
                         defense: 1000,
                         attack: 0,
                         battery_ly: 20,
@@ -368,19 +368,13 @@ impl ExplorerApp {
 
                     ui.horizontal(|ui| {
                         ui.label("Speed (ly/s):");
-                        let mut speed_f32 = self.ship_stats.speed_tenths_ly_s as f32 / 10.0;
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut speed_f32)
-                                    .speed(0.1)
-                                    .range(0.1..=1000.0),
-                            )
-                            .changed()
-                        {
-                            self.ship_stats.speed_tenths_ly_s = (speed_f32 * 10.0).round() as u32;
-                        }
-                        if self.ship_stats.speed_tenths_ly_s < 1 {
-                            self.ship_stats.speed_tenths_ly_s = 1;
+                        ui.add(
+                            egui::DragValue::new(&mut self.ship_stats.speed_lys)
+                                .speed(0.01)
+                                .range(0.1..=1000.0),
+                        );
+                        if self.ship_stats.speed_lys < 0.1 {
+                            self.ship_stats.speed_lys = 0.1;
                         }
                     });
 

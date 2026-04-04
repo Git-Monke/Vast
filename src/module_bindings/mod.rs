@@ -13,6 +13,13 @@ pub mod empire_table;
 pub mod empire_type;
 pub mod material_type;
 pub mod register_empire_reducer;
+pub mod ship_at_planet_type;
+pub mod ship_attack_mode_type;
+pub mod ship_in_transit_type;
+pub mod ship_location_type;
+pub mod ship_stats_type;
+pub mod ship_table;
+pub mod ship_type;
 
 pub use building_kind_type::BuildingKind;
 pub use building_table::*;
@@ -21,6 +28,13 @@ pub use empire_table::*;
 pub use empire_type::Empire;
 pub use material_type::Material;
 pub use register_empire_reducer::register_empire;
+pub use ship_at_planet_type::ShipAtPlanet;
+pub use ship_attack_mode_type::ShipAttackMode;
+pub use ship_in_transit_type::ShipInTransit;
+pub use ship_location_type::ShipLocation;
+pub use ship_stats_type::ShipStats;
+pub use ship_table::*;
+pub use ship_type::Ship;
 
 #[derive(Clone, PartialEq, Debug)]
 
@@ -63,6 +77,7 @@ impl __sdk::Reducer for Reducer {
 pub struct DbUpdate {
     building: __sdk::TableUpdate<Building>,
     empire: __sdk::TableUpdate<Empire>,
+    ship: __sdk::TableUpdate<Ship>,
 }
 
 impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
@@ -77,6 +92,9 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
                 "empire" => db_update
                     .empire
                     .append(empire_table::parse_table_update(table_update)?),
+                "ship" => db_update
+                    .ship
+                    .append(ship_table::parse_table_update(table_update)?),
 
                 unknown => {
                     return Err(__sdk::InternalError::unknown_name(
@@ -109,6 +127,9 @@ impl __sdk::DbUpdate for DbUpdate {
         diff.empire = cache
             .apply_diff_to_table::<Empire>("empire", &self.empire)
             .with_updates_by_pk(|row| &row.identity);
+        diff.ship = cache
+            .apply_diff_to_table::<Ship>("ship", &self.ship)
+            .with_updates_by_pk(|row| &row.id);
 
         diff
     }
@@ -121,6 +142,9 @@ impl __sdk::DbUpdate for DbUpdate {
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "empire" => db_update
                     .empire
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "ship" => db_update
+                    .ship
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 unknown => {
                     return Err(
@@ -141,6 +165,9 @@ impl __sdk::DbUpdate for DbUpdate {
                 "empire" => db_update
                     .empire
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "ship" => db_update
+                    .ship
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 unknown => {
                     return Err(
                         __sdk::InternalError::unknown_name("table", unknown, "QueryRows").into(),
@@ -158,6 +185,7 @@ impl __sdk::DbUpdate for DbUpdate {
 pub struct AppliedDiff<'r> {
     building: __sdk::TableAppliedDiff<'r, Building>,
     empire: __sdk::TableAppliedDiff<'r, Empire>,
+    ship: __sdk::TableAppliedDiff<'r, Ship>,
     __unused: std::marker::PhantomData<&'r ()>,
 }
 
@@ -173,6 +201,7 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
     ) {
         callbacks.invoke_table_row_callbacks::<Building>("building", &self.building, event);
         callbacks.invoke_table_row_callbacks::<Empire>("empire", &self.empire, event);
+        callbacks.invoke_table_row_callbacks::<Ship>("ship", &self.ship, event);
     }
 }
 
@@ -835,6 +864,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
     fn register_tables(client_cache: &mut __sdk::ClientCache<Self>) {
         building_table::register_table(client_cache);
         empire_table::register_table(client_cache);
+        ship_table::register_table(client_cache);
     }
-    const ALL_TABLE_NAMES: &'static [&'static str] = &["building", "empire"];
+    const ALL_TABLE_NAMES: &'static [&'static str] = &["building", "empire", "ship"];
 }

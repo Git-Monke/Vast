@@ -18,7 +18,7 @@ fn main() {
             println!("Connected to SpacetimeDB");
             conn.subscription_builder()
                 .on_applied(|ctx| {
-                    println!("Subscribed to empire and building tables");
+                    println!("Subscribed to empire, building, and ship tables");
                     REGISTER_EMPIRE.call_once(|| {
                         let name = env::var("EMPIRE_NAME")
                             .unwrap_or_else(|_| "Test Empire".to_string());
@@ -32,6 +32,7 @@ fn main() {
                 })
                 .add_query(|q| q.from.empire())
                 .add_query(|q| q.from.building())
+                .add_query(|q| q.from.ship())
                 .subscribe();
         })
         .on_connect_error(|_ctx, e| {

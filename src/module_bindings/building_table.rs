@@ -5,6 +5,7 @@
 use super::building_kind_type::BuildingKind;
 use super::building_type::Building;
 use super::material_type::Material;
+use super::ship_attack_mode_type::ShipAttackMode;
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 /// Table handle for the table `building`.

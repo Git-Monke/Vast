@@ -1,5 +1,6 @@
 use spacetimedb::{Identity, ReducerContext, SpacetimeType, Table};
 use universe::Material;
+use universe::{ShipAttackMode, ShipLocation, ShipStats};
 
 /// Credits granted when an empire first registers.
 const STARTING_CREDITS: u64 = 10_000;
@@ -48,6 +49,7 @@ pub struct Empire {
         accessor = building_by_planet_slot,
         btree(columns = [star_x, star_y, planet_index, slot_index])
     ),
+    index(accessor = building_by_garrison_owner, btree(columns = [owner]))
 )]
 pub struct Building {
     #[primary_key]
@@ -64,6 +66,25 @@ pub struct Building {
     mining_material: Option<Material>,
     /// Stock per species; `f64` is quantity in units (not procedural richness).
     warehouse_inventory: Vec<Material>,
+    /// Military garrison only: empire that operates this garrison. Must be `None` for other kinds.
+    owner: Option<Identity>,
+    /// Military garrison only: same semantics as [`Ship::attack_mode`]. Must be `None` for other kinds.
+    attack_mode: Option<ShipAttackMode>,
+}
+
+#[spacetimedb::table(
+    accessor = ship,
+    public,
+    index(accessor = ship_by_owner, btree(columns = [owner]))
+)]
+pub struct Ship {
+    #[primary_key]
+    #[auto_inc]
+    id: u64,
+    owner: Identity,
+    stats: ShipStats,
+    attack_mode: ShipAttackMode,
+    location: ShipLocation,
 }
 
 #[spacetimedb::reducer(init)]

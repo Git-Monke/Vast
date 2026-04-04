@@ -1,7 +1,53 @@
+/// Travel time in seconds for a straight-line jump: `distance_ly / speed_lys`.
+#[inline]
+#[must_use]
+pub fn travel_duration_secs(distance_ly: f64, speed_lys: f64) -> f64 {
+    if speed_lys <= 0.0 {
+        return f64::INFINITY;
+    }
+    distance_ly / speed_lys
+}
+
+#[cfg_attr(feature = "spacetimedb", derive(spacetimedb::SpacetimeType))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShipAttackMode {
+    Defend,
+    StrikeFirst,
+}
+
+/// Docked at a planet (same coordinates convention as buildings).
+#[cfg(feature = "spacetimedb")]
+#[derive(spacetimedb::SpacetimeType, Clone, Debug, PartialEq)]
+pub struct ShipAtPlanet {
+    pub star_x: i32,
+    pub star_y: i32,
+    pub planet_index: u8,
+}
+
+/// En route between two star cells; timestamps from the server when reducers run.
+#[cfg(feature = "spacetimedb")]
+#[derive(spacetimedb::SpacetimeType, Clone, Debug, PartialEq)]
+pub struct ShipInTransit {
+    pub from_star_x: i32,
+    pub from_star_y: i32,
+    pub to_star_x: i32,
+    pub to_star_y: i32,
+    pub depart_at: spacetimedb::Timestamp,
+    pub arrive_at: spacetimedb::Timestamp,
+}
+
+#[cfg(feature = "spacetimedb")]
+#[derive(spacetimedb::SpacetimeType, Clone, Debug, PartialEq)]
+pub enum ShipLocation {
+    AtPlanet(ShipAtPlanet),
+    InTransit(ShipInTransit),
+}
+
+#[cfg_attr(feature = "spacetimedb", derive(spacetimedb::SpacetimeType))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShipStats {
-    pub size_kt: u32,           // cargo capacity in kilotonnes
-    pub speed_tenths_ly_s: u32, // light-years per second * 10 (1 = 0.1 ly/s)
+    pub size_kt: u32,    // cargo capacity in kilotonnes
+    pub speed_lys: f64, // travel speed in light-years per second
     pub defense: u32,           // hit points required to destroy
     pub attack: u32,            // damage per volley
     pub battery_ly: u32,        // jump distance before recharge
@@ -12,7 +58,7 @@ impl Default for ShipStats {
     fn default() -> Self {
         Self {
             size_kt: 10,
-            speed_tenths_ly_s: 1, // 0.1 ly/s
+            speed_lys: 0.1,
             defense: 10,
             attack: 0,
             battery_ly: 10,
@@ -23,8 +69,8 @@ impl Default for ShipStats {
 
 impl ShipStats {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.speed_tenths_ly_s < 1 {
-            return Err("Speed must be at least 0.1 ly/s (value of 1)");
+        if self.speed_lys < 0.1 {
+            return Err("Speed must be at least 0.1 ly/s");
         }
         Ok(())
     }
@@ -121,7 +167,7 @@ pub fn compute_cost(stats: &ShipStats) -> Result<CostBreakdown, &'static str> {
     let pow_safe = |val: f64, exp: f64| if val <= 0.0 { 0.0 } else { val.powf(exp) };
 
     let size_f = stats.size_kt as f64;
-    let speed_f = (stats.speed_tenths_ly_s as f64) / 10.0;
+    let speed_f = stats.speed_lys;
     let attack_f = stats.attack as f64;
     let defense_f = stats.defense as f64;
     let battery_f = stats.battery_ly as f64;
