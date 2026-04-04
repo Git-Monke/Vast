@@ -3,3 +3,6 @@ publish:
 
 build:
 	spacetime build
+
+explore:
+	cargo run -p explorer --release

@@ -23,10 +23,11 @@
 ## Universe Generation
 
 - Lazily generated, deterministic via seeded hash — stars only written to DB on first interaction
-- 2D grid, 1 ly per cell, Milky Way scale (50,000 ly radius)
-- Star existence: `probability = min(1, 1/spacing)` where `spacing(r) = A * e^(B*r)`
-- Stars have random offset within their cell so distribution isn't grid-aligned
-- Coordinate type: `i32` (units = 1 ly)
+- 2D grid: **one integer step = 0.1 ly** (`i32` stores tenths of a light-year; 10 units = 1 ly)
+- **Disk radius 500,000 ly** ( **1,000,000 ly diameter** ); no stars outside this radius
+- Mean spacing between stars: **~0.3 ly** at the core, **~15 ly** at the disk edge (exponential in radius); per-cell probability `min(1, δ/spacing(r) × PLANE_DENSITY_SCALE)` with cell size `δ = 0.1` ly and **[`PLANE_DENSITY_SCALE`](universe/src/settings.rs) ≈ 10⁻⁶** so a **2D** map stays vastly sparser than a naive 3D-style fill
+- Constants live in [`universe/src/settings.rs`](universe/src/settings.rs) (`CORE_MEAN_SPACING_LY`, `EDGE_MEAN_SPACING_LY`, etc.)
+- Stars have random offset within their cell so distribution isn't grid-aligned *(not implemented in code yet)*
 - Resource richness increases with distance from core
 
 ---

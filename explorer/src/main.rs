@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use eframe::egui;
 use egui::{Color32, Pos2, Sense, Vec2};
-use universe::checker::star_is_at_point;
 use universe::generator::{generate_star, star_info_at, PlanetType, StarSystem, StarType};
+use universe::settings::{grid_to_ly, COORD_UNITS_PER_LY};
 use universe::ships::{compute_cost, ShipStats};
 
 const ZOOM_MIN: f64 = 0.1; // pixels per light-year (max zoom out)
@@ -9,6 +11,45 @@ const ZOOM_MAX: f64 = 400.0; // pixels per light-year (max zoom in)
 /// Assumed max screen half-width in pixels, used to size the star-scan range.
 /// Raise this if stars are cut off at low zoom on a very large monitor.
 const MAX_SCREEN_HALF_PX: f64 = 2000.0;
+/// Chunk side length in **grid units** (tenths of a ly). 640 = 64 ly per chunk side.
+const CHUNK_SIZE: i32 = 64 * COORD_UNITS_PER_LY;
+
+#[derive(Clone, Copy)]
+struct CachedStar {
+    x: i32,
+    y: i32,
+    star_type: StarType,
+    size_solar_radii: f64,
+}
+
+/// Floor division for negative `a` (chunk index), with `b > 0`.
+fn floor_div(a: i32, b: i32) -> i32 {
+    debug_assert!(b > 0);
+    if a >= 0 {
+        a / b
+    } else {
+        (a - b + 1) / b
+    }
+}
+
+fn collect_chunk_stars(cx: i32, cy: i32, chunk_size: i32) -> Vec<CachedStar> {
+    let x0 = cx * chunk_size;
+    let y0 = cy * chunk_size;
+    let mut out = Vec::new();
+    for ly in y0..y0 + chunk_size {
+        for lx in x0..x0 + chunk_size {
+            if let Some((star_type, size_solar_radii)) = star_info_at(lx, ly) {
+                out.push(CachedStar {
+                    x: lx,
+                    y: ly,
+                    star_type,
+                    size_solar_radii,
+                });
+            }
+        }
+    }
+    out
+}
 
 fn star_color(star_type: StarType) -> Color32 {
     match star_type {
@@ -81,6 +122,8 @@ struct ExplorerApp {
     zoom: f64, // pixels per light-year
     selected: Option<StarSystem>,
     ship_stats: ShipStats,
+    /// Lazy-filled map: chunk (cx, cy) → stars whose integer coords lie in that chunk.
+    star_chunks: HashMap<(i32, i32), Vec<CachedStar>>,
 }
 
 impl Default for ExplorerApp {
@@ -92,6 +135,7 @@ impl Default for ExplorerApp {
             zoom: 14.0,
             selected: None,
             ship_stats: ShipStats::default(),
+            star_chunks: HashMap::new(),
         }
     }
 }
@@ -121,7 +165,11 @@ impl ExplorerApp {
                 .show(ctx, |ui| {
                     let sys = self.selected.as_ref().unwrap();
                     ui.add_space(6.0);
-                    ui.heading(format!("({}, {}) ly", sys.x, sys.y));
+                    ui.heading(format!(
+                        "({:.1}, {:.1}) ly",
+                        grid_to_ly(sys.x),
+                        grid_to_ly(sys.y)
+                    ));
                     ui.label(format!("Type:  {:?}", sys.star_type));
                     ui.label(format!("Temp:  {:.0} K", sys.star_type.temperature_k()));
                     ui.label(format!("Size:  {:.4} R☉", sys.star_size_solar_radii));
@@ -199,23 +247,38 @@ impl ExplorerApp {
                 let h = rect.height() as f64;
                 let cx = rect.center();
 
-                let to_screen = |lx: f64, ly: f64| -> Pos2 {
+                let u = COORD_UNITS_PER_LY as f64;
+                // Camera in light-years; grid coordinates are tenths of a ly.
+                let to_screen = |gx: i32, gy: i32| -> Pos2 {
+                    let lx = gx as f64 / u;
+                    let ly = gy as f64 / u;
                     Pos2::new(
                         cx.x + ((lx - self.camera_x) * self.zoom) as f32,
                         cx.y + ((ly - self.camera_y) * self.zoom) as f32,
                     )
                 };
 
-                // Visible integer LY range (capped to prevent excessive iteration)
-                let half_w = (w / (2.0 * self.zoom)).ceil() as i32;
-                let half_h = (h / (2.0 * self.zoom)).ceil() as i32;
-                let scan_cap = (MAX_SCREEN_HALF_PX / ZOOM_MIN).ceil() as i32;
-                let x_min = (self.camera_x as i32 - half_w).max(self.camera_x as i32 - scan_cap);
-                let x_max = (self.camera_x as i32 + half_w).min(self.camera_x as i32 + scan_cap);
-                let y_min = (self.camera_y as i32 - half_h).max(self.camera_y as i32 - scan_cap);
-                let y_max = (self.camera_y as i32 + half_h).min(self.camera_y as i32 + scan_cap);
+                // Visible grid range (capped in tenths of a ly)
+                let half_w_ly = w / (2.0 * self.zoom);
+                let half_h_ly = h / (2.0 * self.zoom);
+                let mut x_min = ((self.camera_x - half_w_ly) * u).floor() as i32;
+                let mut x_max = ((self.camera_x + half_w_ly) * u).ceil() as i32;
+                let mut y_min = ((self.camera_y - half_h_ly) * u).floor() as i32;
+                let mut y_max = ((self.camera_y + half_h_ly) * u).ceil() as i32;
+                let scan_cap = (MAX_SCREEN_HALF_PX / ZOOM_MIN).ceil() as i32 * COORD_UNITS_PER_LY;
+                let cx_t = (self.camera_x * u).round() as i32;
+                let cy_t = (self.camera_y * u).round() as i32;
+                x_min = x_min.max(cx_t - scan_cap);
+                x_max = x_max.min(cx_t + scan_cap);
+                y_min = y_min.max(cy_t - scan_cap);
+                y_max = y_max.min(cy_t + scan_cap);
 
-                // Render stars; track nearest for click
+                let cx_min = floor_div(x_min, CHUNK_SIZE);
+                let cx_max = floor_div(x_max, CHUNK_SIZE);
+                let cy_min = floor_div(y_min, CHUNK_SIZE);
+                let cy_max = floor_div(y_max, CHUNK_SIZE);
+
+                // Render stars; track nearest for click (iterate cached stars only, not every grid cell)
                 let click_pos = if response.clicked() {
                     response.interact_pointer_pos()
                 } else {
@@ -223,43 +286,42 @@ impl ExplorerApp {
                 };
                 let mut nearest: Option<(f32, i32, i32)> = None; // (dist², lx, ly)
 
-                for ly in y_min..=y_max {
-                    for lx in x_min..=x_max {
-                        if !star_is_at_point(lx, ly) {
-                            continue;
-                        }
+                for cy in cy_min..=cy_max {
+                    for cx in cx_min..=cx_max {
+                        let stars = self
+                            .star_chunks
+                            .entry((cx, cy))
+                            .or_insert_with(|| collect_chunk_stars(cx, cy, CHUNK_SIZE));
+                        for cs in stars.iter() {
+                            let sp = to_screen(cs.x, cs.y);
+                            if !rect.contains(sp) {
+                                continue;
+                            }
 
-                        let Some((star_type, size_solar_radii)) = star_info_at(lx, ly) else {
-                            continue;
-                        };
-                        let sp = to_screen(lx as f64, ly as f64);
-                        if !rect.contains(sp) {
-                            continue;
-                        }
+                            let color = star_color(cs.star_type);
+                            let r = visual_radius(cs.size_solar_radii, self.zoom);
 
-                        let color = star_color(star_type);
-                        let r = visual_radius(size_solar_radii, self.zoom);
+                            // Sphere: base fill + soft ambient rim + specular highlight
+                            painter.circle_filled(sp, r, color);
+                            // Dim outer glow to give volume
+                            painter.circle_filled(
+                                sp,
+                                r * 1.25,
+                                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 30),
+                            );
+                            // Specular highlight: small bright spot upper-left
+                            let hl_offset = Vec2::new(-r * 0.28, -r * 0.28);
+                            painter.circle_filled(
+                                sp + hl_offset,
+                                r * 0.32,
+                                Color32::from_rgba_unmultiplied(255, 255, 255, 140),
+                            );
 
-                        // Sphere: base fill + soft ambient rim + specular highlight
-                        painter.circle_filled(sp, r, color);
-                        // Dim outer glow to give volume
-                        painter.circle_filled(
-                            sp,
-                            r * 1.25,
-                            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 30),
-                        );
-                        // Specular highlight: small bright spot upper-left
-                        let hl_offset = Vec2::new(-r * 0.28, -r * 0.28);
-                        painter.circle_filled(
-                            sp + hl_offset,
-                            r * 0.32,
-                            Color32::from_rgba_unmultiplied(255, 255, 255, 140),
-                        );
-
-                        if let Some(cp) = click_pos {
-                            let d2 = (sp.x - cp.x).powi(2) + (sp.y - cp.y).powi(2);
-                            if nearest.map_or(true, |(nd, _, _)| d2 < nd) {
-                                nearest = Some((d2, lx, ly));
+                            if let Some(cp) = click_pos {
+                                let d2 = (sp.x - cp.x).powi(2) + (sp.y - cp.y).powi(2);
+                                if nearest.map_or(true, |(nd, _, _)| d2 < nd) {
+                                    nearest = Some((d2, cs.x, cs.y));
+                                }
                             }
                         }
                     }
@@ -281,7 +343,7 @@ impl ExplorerApp {
 
                 // Highlight selected star
                 if let Some(sys) = &self.selected {
-                    let sp = to_screen(sys.x as f64, sys.y as f64);
+                    let sp = to_screen(sys.x, sys.y);
                     let r = visual_radius(sys.star_size_solar_radii, self.zoom);
                     painter.circle_stroke(
                         sp,
@@ -290,9 +352,17 @@ impl ExplorerApp {
                     );
                 }
 
+                // Unique stars = every star in chunk caches (each cell at most one star; chunks don't overlap).
+                let stars_discovered: usize = self
+                    .star_chunks
+                    .values()
+                    .map(|chunk| chunk.len())
+                    .sum();
+
                 // HUD
+                let hud_origin = rect.left_top() + Vec2::new(10.0, 10.0);
                 painter.text(
-                    rect.left_top() + Vec2::new(10.0, 10.0),
+                    hud_origin,
                     egui::Align2::LEFT_TOP,
                     format!(
                         "({:.1}, {:.1}) ly   zoom {:.1}×   drag/WASD to pan   scroll to zoom   click star for info",
@@ -301,9 +371,35 @@ impl ExplorerApp {
                     egui::FontId::monospace(11.0),
                     Color32::from_gray(130),
                 );
-            });
+                painter.text(
+                    hud_origin + Vec2::new(0.0, 16.0),
+                    egui::Align2::LEFT_TOP,
+                    format!(
+                        "Stars discovered: {}  (unique; grows as you pan into new regions)",
+                        stars_discovered
+                    ),
+                    egui::FontId::monospace(11.0),
+                    Color32::from_gray(130),
+                );
 
-        ctx.request_repaint();
+                let pan_keys = ctx.input(|i| {
+                    i.key_down(egui::Key::ArrowLeft)
+                        || i.key_down(egui::Key::A)
+                        || i.key_down(egui::Key::ArrowRight)
+                        || i.key_down(egui::Key::D)
+                        || i.key_down(egui::Key::ArrowUp)
+                        || i.key_down(egui::Key::W)
+                        || i.key_down(egui::Key::ArrowDown)
+                        || i.key_down(egui::Key::S)
+                });
+                if response.dragged()
+                    || scroll != 0.0
+                    || pan_keys
+                    || ctx.input(|i| i.pointer.any_pressed())
+                {
+                    ctx.request_repaint();
+                }
+            });
     }
 
     fn show_ship_builder(&mut self, ctx: &egui::Context) {
