@@ -6,12 +6,11 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
-pub struct ShipAtPlanet {
+pub struct ShipAtStar {
     pub star_x: i32,
     pub star_y: i32,
-    pub planet_index: u8,
 }
 
-impl __sdk::InModule for ShipAtPlanet {
+impl __sdk::InModule for ShipAtStar {
     type Module = super::RemoteModule;
 }

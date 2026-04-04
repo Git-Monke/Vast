@@ -13,13 +13,14 @@ pub mod empire_table;
 pub mod empire_type;
 pub mod material_type;
 pub mod register_empire_reducer;
-pub mod ship_at_planet_type;
+pub mod ship_at_star_type;
 pub mod ship_attack_mode_type;
 pub mod ship_in_transit_type;
 pub mod ship_location_type;
 pub mod ship_stats_type;
 pub mod ship_table;
 pub mod ship_type;
+pub mod spawn_starter_ship_reducer;
 
 pub use building_kind_type::BuildingKind;
 pub use building_table::*;
@@ -28,13 +29,14 @@ pub use empire_table::*;
 pub use empire_type::Empire;
 pub use material_type::Material;
 pub use register_empire_reducer::register_empire;
-pub use ship_at_planet_type::ShipAtPlanet;
+pub use ship_at_star_type::ShipAtStar;
 pub use ship_attack_mode_type::ShipAttackMode;
 pub use ship_in_transit_type::ShipInTransit;
 pub use ship_location_type::ShipLocation;
 pub use ship_stats_type::ShipStats;
 pub use ship_table::*;
 pub use ship_type::Ship;
+pub use spawn_starter_ship_reducer::spawn_starter_ship;
 
 #[derive(Clone, PartialEq, Debug)]
 
@@ -45,6 +47,7 @@ pub use ship_type::Ship;
 
 pub enum Reducer {
     RegisterEmpire { name: String },
+    SpawnStarterShip,
 }
 
 impl __sdk::InModule for Reducer {
@@ -55,6 +58,7 @@ impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
             Reducer::RegisterEmpire { .. } => "register_empire",
+            Reducer::SpawnStarterShip => "spawn_starter_ship",
             _ => unreachable!(),
         }
     }
@@ -65,6 +69,9 @@ impl __sdk::Reducer for Reducer {
                 __sats::bsatn::to_vec(&register_empire_reducer::RegisterEmpireArgs {
                     name: name.clone(),
                 })
+            }
+            Reducer::SpawnStarterShip => {
+                __sats::bsatn::to_vec(&spawn_starter_ship_reducer::SpawnStarterShipArgs {})
             }
             _ => unreachable!(),
         }

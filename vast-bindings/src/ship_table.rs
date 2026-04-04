@@ -2,6 +2,7 @@
 // WILL NOT BE SAVED. MODIFY TABLES IN YOUR MODULE SOURCE CODE INSTEAD.
 
 #![allow(unused, clippy::all)]
+use super::material_type::Material;
 use super::ship_attack_mode_type::ShipAttackMode;
 use super::ship_location_type::ShipLocation;
 use super::ship_stats_type::ShipStats;

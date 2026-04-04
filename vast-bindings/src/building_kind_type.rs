@@ -4,17 +4,21 @@
 #![allow(unused, clippy::all)]
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
-use super::ship_at_planet_type::ShipAtPlanet;
-use super::ship_in_transit_type::ShipInTransit;
-
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
-pub enum ShipLocation {
-    AtPlanet(ShipAtPlanet),
+#[derive(Copy, Eq, Hash)]
+pub enum BuildingKind {
+    MiningDepot,
 
-    InTransit(ShipInTransit),
+    Warehouse,
+
+    MilitaryGarrison,
+
+    SalesDepot,
+
+    ShipDepot,
 }
 
-impl __sdk::InModule for ShipLocation {
+impl __sdk::InModule for BuildingKind {
     type Module = super::RemoteModule;
 }
