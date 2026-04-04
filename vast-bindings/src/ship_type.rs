@@ -18,6 +18,7 @@ pub struct Ship {
     pub cargo: Vec<Material>,
     pub attack_mode: ShipAttackMode,
     pub location: ShipLocation,
+    pub jump_ready_at: __sdk::Timestamp,
 }
 
 impl __sdk::InModule for Ship {
@@ -34,6 +35,7 @@ pub struct ShipCols {
     pub cargo: __sdk::__query_builder::Col<Ship, Vec<Material>>,
     pub attack_mode: __sdk::__query_builder::Col<Ship, ShipAttackMode>,
     pub location: __sdk::__query_builder::Col<Ship, ShipLocation>,
+    pub jump_ready_at: __sdk::__query_builder::Col<Ship, __sdk::Timestamp>,
 }
 
 impl __sdk::__query_builder::HasCols for Ship {
@@ -46,6 +48,7 @@ impl __sdk::__query_builder::HasCols for Ship {
             cargo: __sdk::__query_builder::Col::new(table_name, "cargo"),
             attack_mode: __sdk::__query_builder::Col::new(table_name, "attack_mode"),
             location: __sdk::__query_builder::Col::new(table_name, "location"),
+            jump_ready_at: __sdk::__query_builder::Col::new(table_name, "jump_ready_at"),
         }
     }
 }
