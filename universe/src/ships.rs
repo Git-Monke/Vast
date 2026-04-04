@@ -15,13 +15,12 @@ pub enum ShipAttackMode {
     StrikeFirst,
 }
 
-/// Docked at a planet (same coordinates convention as buildings).
+/// In a star system (grid coords; same convention as stars). Ships are not pinned to a planet.
 #[cfg(feature = "spacetimedb")]
 #[derive(spacetimedb::SpacetimeType, Clone, Debug, PartialEq)]
-pub struct ShipAtPlanet {
+pub struct ShipAtStar {
     pub star_x: i32,
     pub star_y: i32,
-    pub planet_index: u8,
 }
 
 /// En route between two star cells; timestamps from the server when reducers run.
@@ -39,7 +38,7 @@ pub struct ShipInTransit {
 #[cfg(feature = "spacetimedb")]
 #[derive(spacetimedb::SpacetimeType, Clone, Debug, PartialEq)]
 pub enum ShipLocation {
-    AtPlanet(ShipAtPlanet),
+    AtStar(ShipAtStar),
     InTransit(ShipInTransit),
 }
 

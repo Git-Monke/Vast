@@ -2,7 +2,7 @@ use spacetimedb::{Identity, ReducerContext, SpacetimeType, Table};
 use universe::generator::{generate_star, star_info_at, StarType};
 use universe::settings::COORD_UNITS_PER_LY;
 use universe::Material;
-use universe::{ShipAtPlanet, ShipAttackMode, ShipLocation, ShipStats};
+use universe::{ShipAtStar, ShipAttackMode, ShipLocation, ShipStats};
 
 /// Credits granted when an empire first registers.
 const STARTING_CREDITS: u64 = 10_000;
@@ -13,6 +13,10 @@ const STARTER_DISK_RADIUS_LY: f64 = 5_000.0;
 
 /// Random disk samples tried before giving up (empty Red dwarf + planet with no buildings is sparse).
 const MAX_STARTER_SAMPLE_ATTEMPTS: u32 = 4_096;
+
+/// After each disk sample, search this many cells per side (centered on the sample anchor).
+const STARTER_LOCAL_GRID: i32 = 50;
+const STARTER_LOCAL_HALF: i32 = STARTER_LOCAL_GRID / 2;
 
 #[derive(SpacetimeType, Clone, Debug, PartialEq)]
 pub enum BuildingKind {
@@ -177,24 +181,42 @@ fn sample_disk_grid_point(ctx: &ReducerContext, r_grid: f64) -> (i32, i32) {
     (sx, sy)
 }
 
-fn find_empty_red_dwarf_starter(ctx: &ReducerContext) -> Option<(i32, i32, u8)> {
-    let r_grid = STARTER_DISK_RADIUS_LY * f64::from(COORD_UNITS_PER_LY);
-    for _ in 0..MAX_STARTER_SAMPLE_ATTEMPTS {
-        let (sx, sy) = sample_disk_grid_point(ctx, r_grid);
-        let Some((star_type, _)) = star_info_at(sx, sy) else {
-            continue;
-        };
-        if star_type != StarType::Red {
-            continue;
-        }
-        let Some(sys) = generate_star(sx, sy) else {
-            continue;
-        };
-        for p in sys.planets {
-            if planet_has_any_building(ctx, sx, sy, p.index) {
+/// Row-major scan of a [`STARTER_LOCAL_GRID`]×[`STARTER_LOCAL_GRID`] region centered on `(anchor_x, anchor_y)`.
+fn try_find_starter_in_local_grid(
+    ctx: &ReducerContext,
+    anchor_x: i32,
+    anchor_y: i32,
+) -> Option<(i32, i32)> {
+    for oy in 0..STARTER_LOCAL_GRID {
+        for ox in 0..STARTER_LOCAL_GRID {
+            let gx = anchor_x + ox - STARTER_LOCAL_HALF;
+            let gy = anchor_y + oy - STARTER_LOCAL_HALF;
+            let Some((star_type, _)) = star_info_at(gx, gy) else {
+                continue;
+            };
+            if star_type != StarType::Red {
                 continue;
             }
-            return Some((sx, sy, p.index));
+            let Some(sys) = generate_star(gx, gy) else {
+                continue;
+            };
+            for p in sys.planets {
+                if planet_has_any_building(ctx, gx, gy, p.index) {
+                    continue;
+                }
+                return Some((gx, gy));
+            }
+        }
+    }
+    None
+}
+
+fn find_empty_red_dwarf_starter(ctx: &ReducerContext) -> Option<(i32, i32)> {
+    let r_grid = STARTER_DISK_RADIUS_LY * f64::from(COORD_UNITS_PER_LY);
+    for _ in 0..MAX_STARTER_SAMPLE_ATTEMPTS {
+        let (ax, ay) = sample_disk_grid_point(ctx, r_grid);
+        if let Some(found) = try_find_starter_in_local_grid(ctx, ax, ay) {
+            return Some(found);
         }
     }
     None
@@ -210,9 +232,9 @@ pub fn spawn_starter_ship(ctx: &ReducerContext) -> Result<(), String> {
         return Ok(());
     }
 
-    let Some((star_x, star_y, planet_index)) = find_empty_red_dwarf_starter(ctx) else {
+    let Some((star_x, star_y)) = find_empty_red_dwarf_starter(ctx) else {
         return Err(
-            "No empty starter planet on a Red dwarf found after random samples in the starter disk"
+            "No empty starter planet on a Red dwarf found after searching the starter disk (50×50 grid per sample)"
                 .to_string(),
         );
     };
@@ -223,11 +245,7 @@ pub fn spawn_starter_ship(ctx: &ReducerContext) -> Result<(), String> {
         stats: ShipStats::default(),
         cargo: vec![],
         attack_mode: ShipAttackMode::Defend,
-        location: ShipLocation::AtPlanet(ShipAtPlanet {
-            star_x,
-            star_y,
-            planet_index,
-        }),
+        location: ShipLocation::AtStar(ShipAtStar { star_x, star_y }),
     });
 
     Ok(())

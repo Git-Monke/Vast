@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc;
 
 use eframe::egui;
 use egui::{Color32, Pos2, Sense, Vec2};
 use spacetimedb_sdk::{DbContext, Table};
 use vast_bindings::{
     buildingQueryTableAccess, empireQueryTableAccess, register_empire, shipQueryTableAccess,
-    spawn_starter_ship, DbConnection, Empire, EmpireTableAccess, Ship, ShipLocation,
-    ShipTableAccess,
+    spawn_starter_ship, DbConnection, Empire, EmpireTableAccess, Material, Ship, ShipAttackMode,
+    ShipLocation, ShipTableAccess,
 };
 use universe::generator::{generate_star, star_info_at, PlanetType, StarSystem, StarType};
 use universe::settings::{grid_to_ly, COORD_UNITS_PER_LY};
@@ -96,6 +97,24 @@ fn format_large_number(num: u64) -> String {
     }
 }
 
+/// True if the ship is tied to this star (in this system, or in transit from/to here).
+fn my_ship_at_star_coords(ship: &Ship, star_x: i32, star_y: i32) -> bool {
+    match &ship.location {
+        ShipLocation::AtStar(loc) => loc.star_x == star_x && loc.star_y == star_y,
+        ShipLocation::InTransit(t) => {
+            (t.from_star_x == star_x && t.from_star_y == star_y)
+                || (t.to_star_x == star_x && t.to_star_y == star_y)
+        }
+    }
+}
+
+fn format_material_line(m: &Material) -> String {
+    match m {
+        Material::Iron(q) => format!("Iron {:.2}", q),
+        Material::Helium(q) => format!("Helium {:.2}", q),
+    }
+}
+
 fn format_time(minutes: u64) -> String {
     if minutes >= 24 * 60 * 7 {
         format!(
@@ -140,14 +159,28 @@ struct ExplorerApp {
     conn: Option<DbConnection>,
     connect_error: Option<String>,
     bootstrap_error: Option<String>,
+    bootstrap_err_tx: mpsc::Sender<String>,
+    bootstrap_err_rx: mpsc::Receiver<String>,
     empire_name_input: String,
     my_empire: Option<Empire>,
     my_ships: Vec<Ship>,
     did_center_camera: bool,
+    /// Selected ship in the star info panel (for highlighting and "Center on map").
+    selected_ship_id: Option<u64>,
+    /// Clears [`Self::selected_ship_id`] when the user selects a different star system.
+    prev_selected_star: Option<(i32, i32)>,
 }
 
 impl eframe::App for ExplorerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut bootstrap_msgs = 0u32;
+        while let Ok(msg) = self.bootstrap_err_rx.try_recv() {
+            self.bootstrap_error = Some(msg);
+            bootstrap_msgs += 1;
+        }
+        if bootstrap_msgs > 0 {
+            ctx.request_repaint();
+        }
         self.sync_session(ctx);
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -165,6 +198,7 @@ impl eframe::App for ExplorerApp {
 
 impl ExplorerApp {
     fn new(cc: &eframe::CreationContext) -> Self {
+        let (bootstrap_err_tx, bootstrap_err_rx) = mpsc::channel();
         let mut app = Self {
             current_tab: Tab::Universe,
             camera_x: 0.0,
@@ -176,10 +210,14 @@ impl ExplorerApp {
             conn: None,
             connect_error: None,
             bootstrap_error: None,
+            bootstrap_err_tx,
+            bootstrap_err_rx,
             empire_name_input: String::new(),
             my_empire: None,
             my_ships: Vec::new(),
             did_center_camera: false,
+            selected_ship_id: None,
+            prev_selected_star: None,
         };
         app.start_connection(cc);
         app
@@ -250,7 +288,7 @@ impl ExplorerApp {
         }
         if !self.did_center_camera {
             if let Some(ship) = self.my_ships.first() {
-                if let ShipLocation::AtPlanet(loc) = &ship.location {
+                if let ShipLocation::AtStar(loc) = &ship.location {
                     self.camera_x = grid_to_ly(loc.star_x);
                     self.camera_y = grid_to_ly(loc.star_y);
                     self.did_center_camera = true;
@@ -260,6 +298,12 @@ impl ExplorerApp {
     }
 
     fn show_universe(&mut self, ctx: &egui::Context) {
+        let cur_star = self.selected.as_ref().map(|s| (s.x, s.y));
+        if self.prev_selected_star != cur_star {
+            self.selected_ship_id = None;
+            self.prev_selected_star = cur_star;
+        }
+
         if !self.game_ready() {
             egui::CentralPanel::default()
                 .frame(egui::Frame::none().fill(Color32::from_rgb(4, 4, 12)))
@@ -288,12 +332,36 @@ impl ExplorerApp {
                             if name.is_empty() {
                                 self.bootstrap_error = Some("Enter an empire name.".into());
                             } else if let Some(conn) = &self.conn {
-                                if let Err(e) = conn.reducers().register_empire(name) {
-                                    self.bootstrap_error =
-                                        Some(format!("Could not send register_empire: {e:?}"));
-                                } else if let Err(e) = conn.reducers().spawn_starter_ship() {
-                                    self.bootstrap_error =
-                                        Some(format!("Could not send spawn_starter_ship: {e:?}"));
+                                let tx = self.bootstrap_err_tx.clone();
+                                if let Err(e) = conn.reducers().register_empire_then(name, move |ctx, res| {
+                                    match res {
+                                        Ok(Ok(())) => {
+                                            let tx2 = tx.clone();
+                                            let _ = ctx.reducers().spawn_starter_ship_then(
+                                                move |_ctx2, res2| match res2 {
+                                                    Ok(Ok(())) => {}
+                                                    Ok(Err(msg)) => {
+                                                        let _ = tx2.send(format!("Spawn: {msg}"));
+                                                    }
+                                                    Err(err) => {
+                                                        let _ = tx2.send(format!(
+                                                            "Spawn failed: {err:?}"
+                                                        ));
+                                                    }
+                                                },
+                                            );
+                                        }
+                                        Ok(Err(msg)) => {
+                                            let _ = tx.send(format!("Register: {msg}"));
+                                        }
+                                        Err(err) => {
+                                            let _ = tx.send(format!("Register failed: {err:?}"));
+                                        }
+                                    }
+                                }) {
+                                    self.bootstrap_error = Some(format!(
+                                        "Could not send register_empire: {e:?}"
+                                    ));
                                 }
                             } else {
                                 self.bootstrap_error =
@@ -316,7 +384,7 @@ impl ExplorerApp {
         // ── Side panel: selected system info ────────────────────────────────
         if self.selected.is_some() {
             egui::SidePanel::right("info")
-                .min_width(260.0)
+                .min_width(300.0)
                 .show(ctx, |ui| {
                     let sys = self.selected.as_ref().unwrap();
                     ui.add_space(6.0);
@@ -328,6 +396,129 @@ impl ExplorerApp {
                     ui.label(format!("Type:  {:?}", sys.star_type));
                     ui.label(format!("Temp:  {:.0} K", sys.star_type.temperature_k()));
                     ui.label(format!("Size:  {:.4} R☉", sys.star_size_solar_radii));
+                    ui.separator();
+                    ui.heading("Your ships");
+                    let mut ships_here: Vec<&Ship> = self
+                        .my_ships
+                        .iter()
+                        .filter(|s| my_ship_at_star_coords(s, sys.x, sys.y))
+                        .collect();
+                    ships_here.sort_by_key(|s| s.id);
+                    if ships_here.is_empty() {
+                        ui.label(
+                            egui::RichText::new("None at this system.")
+                                .italics()
+                                .weak(),
+                        );
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .max_height(220.0)
+                            .show(ui, |ui| {
+                                for ship in ships_here {
+                                    let is_sel = self.selected_ship_id == Some(ship.id);
+                                    egui::Frame::group(ui.style())
+                                        .stroke(egui::Stroke::new(
+                                            if is_sel { 1.5 } else { 1.0 },
+                                            if is_sel {
+                                                Color32::from_rgb(120, 200, 255)
+                                            } else {
+                                                Color32::from_gray(60)
+                                            },
+                                        ))
+                                        .inner_margin(egui::Margin::same(8.0))
+                                        .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    is_sel,
+                                                    egui::RichText::new(format!(
+                                                        "Ship #{}",
+                                                        ship.id
+                                                    ))
+                                                    .strong(),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.selected_ship_id = Some(ship.id);
+                                            }
+                                        });
+                                        let st = &ship.stats;
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Size {} kt  ·  {:.2} ly/s  ·  Def {}  ·  Atk {}",
+                                                st.size_kt,
+                                                st.speed_lys,
+                                                st.defense,
+                                                st.attack
+                                            ))
+                                            .monospace()
+                                            .size(11.0),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Battery {} ly  ·  Radar {} ly",
+                                                st.battery_ly, st.radar_ly
+                                            ))
+                                            .monospace()
+                                            .size(11.0),
+                                        );
+                                        let mode_s = match ship.attack_mode {
+                                            ShipAttackMode::Defend => "Defend",
+                                            ShipAttackMode::StrikeFirst => "Strike first",
+                                        };
+                                        ui.label(format!("Attack mode: {mode_s}"));
+                                        match &ship.location {
+                                            ShipLocation::AtStar(_) => {
+                                                ui.label("Location: in star system");
+                                            }
+                                            ShipLocation::InTransit(t) => {
+                                                ui.label(format!(
+                                                    "In transit: ({:.1},{:.1}) → ({:.1},{:.1}) ly",
+                                                    grid_to_ly(t.from_star_x),
+                                                    grid_to_ly(t.from_star_y),
+                                                    grid_to_ly(t.to_star_x),
+                                                    grid_to_ly(t.to_star_y),
+                                                ));
+                                            }
+                                        }
+                                        if !ship.cargo.is_empty() {
+                                            ui.label("Cargo:");
+                                            for m in &ship.cargo {
+                                                ui.label(format!(
+                                                    "  · {}",
+                                                    format_material_line(m)
+                                                ));
+                                            }
+                                        } else {
+                                            ui.label(
+                                                egui::RichText::new("Cargo: empty")
+                                                    .weak()
+                                                    .small(),
+                                            );
+                                        }
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Center on map").clicked() {
+                                                self.selected_ship_id = Some(ship.id);
+                                                match &ship.location {
+                                                    ShipLocation::AtStar(loc) => {
+                                                        self.camera_x = grid_to_ly(loc.star_x);
+                                                        self.camera_y = grid_to_ly(loc.star_y);
+                                                    }
+                                                    ShipLocation::InTransit(t) => {
+                                                        self.camera_x = (grid_to_ly(t.from_star_x)
+                                                            + grid_to_ly(t.to_star_x))
+                                                            * 0.5;
+                                                        self.camera_y = (grid_to_ly(t.from_star_y)
+                                                            + grid_to_ly(t.to_star_y))
+                                                            * 0.5;
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    });
+                                }
+                            });
+                    }
                     ui.separator();
                     ui.label(format!("{} planet(s)", sys.planets.len()));
                     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -507,6 +698,32 @@ impl ExplorerApp {
                     );
                 }
 
+                // Owned ships: marker at star; dim line when in transit
+                let ship_marker_r = (self.zoom * 0.12).clamp(3.0, 14.0) as f32;
+                let ship_accent = Color32::from_rgb(0, 220, 255);
+                let ship_line = Color32::from_rgba_unmultiplied(0, 200, 255, 120);
+                for ship in &self.my_ships {
+                    match &ship.location {
+                        ShipLocation::AtStar(loc) => {
+                            let sp = to_screen(loc.star_x, loc.star_y);
+                            painter.circle_stroke(
+                                sp,
+                                ship_marker_r,
+                                egui::Stroke::new(1.8, ship_accent),
+                            );
+                            painter.circle_filled(sp, ship_marker_r * 0.35, ship_accent);
+                        }
+                        ShipLocation::InTransit(t) => {
+                            let a = to_screen(t.from_star_x, t.from_star_y);
+                            let b = to_screen(t.to_star_x, t.to_star_y);
+                            painter.line_segment(
+                                [a, b],
+                                egui::Stroke::new(1.0, ship_line),
+                            );
+                        }
+                    }
+                }
+
                 // Unique stars = every star in chunk caches (each cell at most one star; chunks don't overlap).
                 let stars_discovered: usize = self
                     .star_chunks
@@ -536,6 +753,52 @@ impl ExplorerApp {
                         Color32::from_rgb(180, 220, 255),
                     );
                     hud_y += 16.0;
+                }
+                if !self.my_ships.is_empty() {
+                    painter.text(
+                        hud_origin + Vec2::new(0.0, hud_y),
+                        egui::Align2::LEFT_TOP,
+                        format!("Ships: {}", self.my_ships.len()),
+                        egui::FontId::monospace(11.0),
+                        Color32::from_rgb(160, 240, 255),
+                    );
+                    hud_y += 14.0;
+                    for s in self.my_ships.iter().take(5) {
+                        let line = match &s.location {
+                            ShipLocation::AtStar(loc) => format!(
+                                "  #{}  ({:.1}, {:.1}) ly",
+                                s.id,
+                                grid_to_ly(loc.star_x),
+                                grid_to_ly(loc.star_y),
+                            ),
+                            ShipLocation::InTransit(t) => format!(
+                                "  #{}  transit  ({:.1},{:.1})→({:.1},{:.1}) ly",
+                                s.id,
+                                grid_to_ly(t.from_star_x),
+                                grid_to_ly(t.from_star_y),
+                                grid_to_ly(t.to_star_x),
+                                grid_to_ly(t.to_star_y),
+                            ),
+                        };
+                        painter.text(
+                            hud_origin + Vec2::new(0.0, hud_y),
+                            egui::Align2::LEFT_TOP,
+                            line,
+                            egui::FontId::monospace(10.0),
+                            Color32::from_rgb(140, 200, 220),
+                        );
+                        hud_y += 13.0;
+                    }
+                    if self.my_ships.len() > 5 {
+                        painter.text(
+                            hud_origin + Vec2::new(0.0, hud_y),
+                            egui::Align2::LEFT_TOP,
+                            format!("  … +{} more", self.my_ships.len() - 5),
+                            egui::FontId::monospace(10.0),
+                            Color32::from_rgb(140, 200, 220),
+                        );
+                        hud_y += 13.0;
+                    }
                 }
                 painter.text(
                     hud_origin + Vec2::new(0.0, hud_y),
