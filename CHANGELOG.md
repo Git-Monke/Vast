@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **SpacetimeDB — star-system economy (lazy mining):** public table **`star_system_stock`** (`star_location_id`, `last_settled_at`, `capacity_kt`, **`settled: Vec<Material>`**). Mining accrues only on **settlement** (no scheduled mining ticks): `t_eff = min(Δt, remaining_kt / total_kt_s)` with proportional clamp to capacity; miner rate per depot = `level × planet_richness × resource_richness × 0.01 × (1 − degradation)`; warehouse capacity = **Σ (warehouse level × 1 kt)** per star. Reducer **`collect_star_resources(ship_id, pickup)`** (ship must be **`AtStar`**) settles then loads requested materials onto **ship cargo** (enforces cargo capacity). **`place_building`** / **`upgrade_building`** call settlement before mutating buildings. Helpers in [`spacetimedb/src/star_economy.rs`](spacetimedb/src/star_economy.rs), [`universe::material_stock`](universe/src/material_stock.rs), and [`spacetimedb/src/building_rules.rs`](spacetimedb/src/building_rules.rs).
+- **Galaxy Explorer:** subscribes to **`star_system_stock`**; **Star economy** panel shows capacity, per-material mining rates, military power, ship build slots, settled/available kt; **Collect from warehouse** builds a **`Vec<Material>`** and calls **`collect_star_resources`**.
+- **[`universe::star_location_id`](universe/src/star_id.rs):** 128-bit id for a star cell (matches server `star_location_id`).
 - **SpacetimeDB:** **`place_building`** and **`upgrade_building`** — instant placement on a **planet slot**; **stationed ship** at the star required (`AtStar` only); **hardcoded** min ship size (kt) per **level** (levels 1–12); credits per kind/level in [`spacetimedb/src/building_rules.rs`](spacetimedb/src/building_rules.rs). **SalesDepot:** owned (`owner` set), **no gameplay level** (stored `level` fixed at 1), price **`1000 × 2^n`** credits where **`n`** is how many Sales Depots you already own. **MiningDepot / Warehouse / ShipDepot:** **`owner` is `None`**. **Enemy military garrison** on a planet blocks **build and upgrade** there unless it is yours.
 - **Galaxy Explorer:** **Construction** section on the selected star — pick planet, slot, kind, level (except Sales Depot), place building; **upgrade +1** on listed structures; cost preview mirrors server rules ([`explorer/src/building_economy.rs`](explorer/src/building_economy.rs), keep in sync with `building_rules`).
 
@@ -21,11 +24,15 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **[`universe::Material`](universe/src/resources.rs):** **`amount()`** returns the inner `f64`; **`multiplier()`** delegates to it. **[`material_stock`](universe/src/material_stock.rs)** uses **`amount()`** where only the payload matters. **Galaxy Explorer** [`building_economy`](explorer/src/building_economy.rs) uses **`binding_to_universe`** / **`universe_to_binding`** and **`Material::kind()`** for mining rates and pickup so new ores extend those two conversions (plus **`MaterialKind::ALL`**) instead of scattered Iron/Helium matches.
+
 - **`spawn_starter_ship`:** the starter ship’s **`jump_ready_at`** is set to **spawn time** so the **battery is ready to warp immediately** (no initial recharge wait at the starter star).
 
 - **`spawn_starter_ship` / `find_empty_red_dwarf_starter`:** after each random disk sample, searches a **50×50** integer grid **centered** on that anchor (row-major) for a **Red dwarf** with an **empty** first qualifying planet; improves hit rate vs. testing only the anchor cell. User-visible error text mentions the local grid when no slot is found.
 
 ### Fixed
+
+- **Galaxy Explorer:** realtime readouts (ship **in-transit** bubble, star-economy **theoretical** stock using wall-clock time) no longer stall when the map is **idle** — the app now **`request_repaint()`** on the Universe tab while **connected** so `sync_session` / `frame_tick` run on a steady cadence (previously repaints were only requested on map drag/scroll/keys). **Debug** builds **`eprintln!`** when **`frame_tick`** exceeds **16 ms** to spot slow SpacetimeDB client work.
 
 - **Galaxy Explorer:** **scroll wheel** over the star info side panel no longer **zooms the map** (zoom applies only when the cursor is over the map); the whole info panel uses **one vertical scroll** instead of nested scroll regions fighting each other.
 
@@ -34,9 +41,17 @@ All notable changes to this project will be documented in this file.
 
 ### Performance
 
-- **Galaxy Explorer** ([`explorer`](explorer/src/main.rs)): Universe map caches stars per 64×64 ly chunk instead of scanning every integer coordinate in view each frame; repaints only while panning, zooming, holding movement keys, or on pointer press (lower idle CPU).
+- **Galaxy Explorer** ([`explorer`](explorer/src/main.rs)): Universe map caches stars per 64×64 ly chunk instead of scanning every integer coordinate in view each frame. While **not** connected, repaints are still driven mainly by map interaction (lower idle CPU). While **connected**, repaints run continuously so replicated state stays live. The selected-star side panel **throttles** full-table **`building`** scans to **150 ms** per star; **`star_system_stock`** for the current star is refreshed **every frame** (typically a small table).
+
+### Notes (developer)
+
+- **Galaxy Explorer / SpacetimeDB:** moving **`frame_tick`** off the UI thread via **`run_threaded()`** and callback-driven snapshots ([`AGENTS.md`](AGENTS.md)) remains a follow-up if **`frame_tick`** profiling shows sustained multi-ms stalls after the repaint fix.
 
 ### Breaking
+
+- **`star_system_stock` / `collect_star_resources`:** replaced **`settled_iron_kt`** / **`settled_helium_kt`** with **`settled: Vec<Material>`**. **`collect_star_resources`** now takes **`pickup: Vec<Material>`** instead of two `f64` arguments. Regenerate client bindings (`spacetime generate …`), update clients, and republish with **`--clear-database`** when adopting.
+
+- **SpacetimeDB `building`:** removed **`warehouse_inventory`** (shared stock lives on **`star_system_stock`**). Regenerate bindings and republish with **`--clear-database`** as needed.
 
 - **`building` index** renamed **`building_by_garrison_owner`** → **`building_by_owner`**. Republish with **`--clear-database`** if you rely on old client bindings. **`BuildingKind`** derives **`Copy`** for reducer ergonomics.
 
@@ -57,8 +72,7 @@ All notable changes to this project will be documented in this file.
 - SpacetimeDB `building`: optional **`owner`** (`Option<Identity>`) and **`attack_mode`** (`Option<ShipAttackMode>`) for **military garrisons** only; other building kinds use `None`. Index `building_by_garrison_owner` on `owner`. Reducers do not enforce garrison invariants yet.
 - [`ShipStats`](universe/src/ships.rs): `speed_tenths_ly_s` (`u32`) replaced by **`speed_lys` (`f64`)** — speed in light-years per second directly. Removed `speed_ly_per_s`; [`travel_duration_secs`](universe/src/ships.rs) now takes `speed_lys`.
 - `MaterialKind` (Iron / Helium) lives in [`universe`](universe/src/resources.rs) with optional `SpacetimeType` via the `universe/spacetimedb` feature. [`Material`](universe/src/resources.rs) also derives `SpacetimeType` when that feature is enabled.
-- **Semantics:** procedural `Material` uses `f64` as spawn **richness**; SpacetimeDB `building.warehouse_inventory` uses `Material` with `f64` as **stored quantity** (units). `building.mining_material` is `Option<Material>` (species + placeholder `f64` for future rates).
-- Removed `InventoryEntry`; warehouse stock is `Vec<Material>` only.
+- **Semantics:** procedural `Material` uses `f64` as spawn **richness**; star-system **stored** quantities are **`star_system_stock.settled`** (and ship **`cargo`**). `building.mining_material` is `Option<Material>` (species + vein **richness** multiplier).
 
 ### Added
 
@@ -71,7 +85,7 @@ All notable changes to this project will be documented in this file.
 - SpacetimeDB `empire` table: `identity` (primary key), unique `name`, and `credits` (starting balance on registration).
 - `register_empire` reducer to create an empire once per identity with validated name and starting credits.
 - Root client (`src/main.rs`) subscribes to `empire`, registers via `EMPIRE_NAME` (default `Test Empire`), and logs new empire rows.
-- SpacetimeDB `ship` table: `owner`, [`ShipStats`](universe/src/ships.rs) (includes `size_kt` capacity), **`cargo`** (`Vec<Material>` hold inventory, same quantity semantics as `building.warehouse_inventory`; capacity enforcement deferred to future reducers), [`ShipAttackMode`](universe/src/ships.rs), [`ShipLocation`](universe/src/ships.rs) (`AtStar` / `InTransit` with timestamps). Index `ship_by_owner`. No spawn/warp reducers yet.
+- SpacetimeDB `ship` table: `owner`, [`ShipStats`](universe/src/ships.rs) (includes `size_kt` capacity), **`cargo`** (`Vec<Material>` hold inventory in kt; **`collect_star_resources`** enforces capacity), [`ShipAttackMode`](universe/src/ships.rs), [`ShipLocation`](universe/src/ships.rs) (`AtStar` / `InTransit` with timestamps). Index `ship_by_owner`. No spawn/warp reducers yet.
 - [`travel_duration_secs`](universe/src/ships.rs): `duration = distance_ly / speed_lys` using [`ShipStats::speed_lys`](universe/src/ships.rs) (light-years per second, `f64`).
 
 ### Removed

@@ -1,15 +1,18 @@
 mod building_rules;
+mod star_economy;
 
 use building_rules::{
     credits_delta_upgrade, credits_for_leveled_place, min_ship_kt_for_level, sales_depot_next_cost,
     MAX_BUILDING_LEVEL,
 };
+use star_economy::{cargo_total_kt, settle_star_resources};
 
 use spacetimedb::{
     Identity, ReducerContext, ScheduleAt, SpacetimeType, Table, TimeDuration, Timestamp,
 };
 use universe::generator::{generate_star, star_info_at, StarType};
 use universe::settings::{distance_between_cells_ly, COORD_UNITS_PER_LY};
+use universe::material_stock::{merge_into_cargo, total_kt, try_subtract_materials};
 use universe::Material;
 use universe::{
     ShipAtStar, ShipAttackMode, ShipInTransit, ShipLocation, ShipStats,
@@ -53,6 +56,14 @@ pub fn planet_location_id(star_x: i32, star_y: i32, planet_index: u8) -> u128 {
     x | (y << 32) | (p << 64)
 }
 
+/// Stable id for a star cell (no planet bits); used by [`StarSystemStock`].
+#[must_use]
+pub fn star_location_id(star_x: i32, star_y: i32) -> u128 {
+    let x = u128::from(star_x as u32);
+    let y = u128::from(star_y as u32);
+    x | (y << 32)
+}
+
 #[spacetimedb::table(accessor = empire, public)]
 pub struct Empire {
     #[primary_key]
@@ -88,12 +99,24 @@ pub struct Building {
     degradation_percent: f32,
     /// Which vein this depot targets; `f64` reserved for future rate/amount semantics.
     mining_material: Option<Material>,
-    /// Stock per species; `f64` is quantity in units (not procedural richness).
-    warehouse_inventory: Vec<Material>,
     /// [`Some`] for **SalesDepot** (owner empire) and **MilitaryGarrison** (operator). **`None`** for unowned kinds (miner, warehouse, ship depot).
     owner: Option<Identity>,
     /// **MilitaryGarrison** only: combat posture. Must be `None` for other kinds.
     attack_mode: Option<ShipAttackMode>,
+}
+
+/// Shared star-system warehouse state: settled kt per material, lazy mining via [`last_settled_at`].
+#[spacetimedb::table(accessor = star_system_stock, public)]
+pub struct StarSystemStock {
+    #[primary_key]
+    star_location_id: u128,
+    star_x: i32,
+    star_y: i32,
+    last_settled_at: Timestamp,
+    /// Cached ceiling from warehouses; updated on settlement.
+    capacity_kt: f64,
+    /// Merged kt per [`Material`] kind (warehouse hold).
+    settled: Vec<Material>,
 }
 
 #[spacetimedb::table(
@@ -107,7 +130,7 @@ pub struct Ship {
     id: u64,
     owner: Identity,
     stats: ShipStats,
-    /// Hold contents; `f64` on each [`Material`] variant is quantity (units), same as [`Building::warehouse_inventory`].
+    /// Hold contents; `f64` on each [`Material`] variant is quantity in kt.
     /// Total load must stay within [`ShipStats::size_kt`] when reducers enforce logistics.
     cargo: Vec<Material>,
     attack_mode: ShipAttackMode,
@@ -495,6 +518,79 @@ pub fn complete_warp(ctx: &ReducerContext, job: WarpJob) -> Result<(), String> {
     Ok(())
 }
 
+/// Load resources from the star’s shared warehouse onto a docked ship. Runs settlement first.
+#[spacetimedb::reducer]
+pub fn collect_star_resources(
+    ctx: &ReducerContext,
+    ship_id: u64,
+    pickup: Vec<Material>,
+) -> Result<(), String> {
+    if ctx.db.empire().identity().find(ctx.sender()).is_none() {
+        return Err("Register an empire first".to_string());
+    }
+    for m in &pickup {
+        let q = match m {
+            Material::Iron(q) | Material::Helium(q) => *q,
+        };
+        if q < 0.0 {
+            return Err("Pickup amounts must be non-negative".to_string());
+        }
+    }
+    if total_kt(&pickup) <= 1e-12 {
+        return Err("Specify a positive amount to collect".to_string());
+    }
+
+    let ship = ctx
+        .db
+        .ship()
+        .id()
+        .find(&ship_id)
+        .ok_or_else(|| "Ship not found".to_string())?;
+    if ship.owner != ctx.sender() {
+        return Err("Not your ship".to_string());
+    }
+
+    let ShipLocation::AtStar(loc) = &ship.location else {
+        return Err("Ship is not docked at a star".to_string());
+    };
+    let star_x = loc.star_x;
+    let star_y = loc.star_y;
+
+    settle_star_resources(ctx, star_x, star_y)?;
+
+    let sid = star_location_id(star_x, star_y);
+    let row = ctx
+        .db
+        .star_system_stock()
+        .star_location_id()
+        .find(&sid)
+        .ok_or_else(|| "Star system stock missing".to_string())?;
+
+    let new_cargo_total = cargo_total_kt(&ship.cargo) + total_kt(&pickup);
+    if new_cargo_total > ship.stats.size_kt as f64 + 1e-6 {
+        return Err(format!(
+            "Cargo capacity exceeded (would be {:.2} / {} kt)",
+            new_cargo_total,
+            ship.stats.size_kt
+        ));
+    }
+
+    let mut settled = row.settled.clone();
+    try_subtract_materials(&mut settled, &pickup)?;
+
+    ctx.db.star_system_stock().star_location_id().update(StarSystemStock {
+        settled,
+        ..row
+    });
+
+    let mut cargo = ship.cargo.clone();
+    merge_into_cargo(&mut cargo, &pickup);
+
+    ctx.db.ship().id().update(Ship { cargo, ..ship });
+
+    Ok(())
+}
+
 #[spacetimedb::reducer]
 pub fn place_building(
     ctx: &ReducerContext,
@@ -599,6 +695,8 @@ pub fn place_building(
         }
     };
 
+    settle_star_resources(ctx, star_x, star_y)?;
+
     deduct_credits(ctx, cost)?;
 
     ctx.db.building().insert(Building {
@@ -611,7 +709,6 @@ pub fn place_building(
         level: eff_level,
         degradation_percent: 0.0,
         mining_material: mining_mat,
-        warehouse_inventory: vec![],
         owner,
         attack_mode,
     });
@@ -666,6 +763,8 @@ pub fn upgrade_building(ctx: &ReducerContext, building_id: u64, new_level: u32) 
 
     let delta = credits_delta_upgrade(b.kind, b.level, new_level)
         .ok_or_else(|| "Invalid upgrade".to_string())?;
+
+    settle_star_resources(ctx, b.star_x, b.star_y)?;
 
     deduct_credits(ctx, delta)?;
 

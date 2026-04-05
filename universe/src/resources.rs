@@ -5,10 +5,15 @@ const RESOURCE_SEED: u64 = 0xAAAA_AAAA_AAAA_AAAA;
 
 /// Tag-only material species (e.g. [`Material::kind`] without caring about the `f64` payload).
 #[cfg_attr(feature = "spacetimedb", derive(spacetimedb::SpacetimeType))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MaterialKind {
     Iron,
     Helium,
+}
+
+impl MaterialKind {
+    /// Every variant, in stable order — update when adding a [`Material`] variant.
+    pub const ALL: &'static [MaterialKind] = &[MaterialKind::Iron, MaterialKind::Helium];
 }
 
 /// Resource amount or richness, depending on context.
@@ -38,11 +43,20 @@ impl Material {
         }
     }
 
-    pub fn multiplier(&self) -> f64 {
+    /// Inner `f64`: vein multiplier, stored kt, etc. Update the match when adding a variant.
+    #[inline]
+    #[must_use]
+    pub fn amount(&self) -> f64 {
         match self {
-            Material::Iron(m) => *m,
-            Material::Helium(m) => *m,
+            Material::Iron(m) | Material::Helium(m) => *m,
         }
+    }
+
+    /// Same as [`amount`](Self::amount); kept for procedural “richness” call sites.
+    #[inline]
+    #[must_use]
+    pub fn multiplier(&self) -> f64 {
+        self.amount()
     }
 }
 

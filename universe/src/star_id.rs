@@ -13,6 +13,12 @@
 
 const BLOCK: i32 = 10_000;
 
+/// Stable id for a star grid cell (matches server `star_location_id`).
+#[must_use]
+pub fn star_location_id(star_x: i32, star_y: i32) -> u128 {
+    u128::from(star_x as u32) | (u128::from(star_y as u32) << 32)
+}
+
 /// Map one block index to a letter, or `None` if outside **-26..=25**.
 fn block_char(b: i32) -> Option<char> {
     if (0..=25).contains(&b) {
@@ -100,5 +106,11 @@ mod tests {
     fn examples_from_spec() {
         assert_eq!(star_display_id(1000, 1000), "AA-1000-1000");
         assert_eq!(star_display_id(11_000, 1000), "BA-1000-1000");
+    }
+
+    #[test]
+    fn star_location_id_packed() {
+        assert_eq!(super::star_location_id(0, 0), 0u128);
+        assert_eq!(super::star_location_id(-1, 2), u128::from(-1i32 as u32) | (u128::from(2u32) << 32));
     }
 }

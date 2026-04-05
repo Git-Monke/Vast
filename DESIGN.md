@@ -136,17 +136,20 @@ Strike first risks starting fights with neutrals; bots must manage trust lists c
 ### Building Types (MVP)
 | Building | Function |
 |---|---|
-| Mining Depot | Extracts resources on a scheduled tick, deposits into warehouse |
-| Ship Depot | Spawns ships (requires military presence) |
-| Warehouse | Stores extracted resources |
+| Mining Depot | Adds extraction **rate** (see **Star-system resources** below); no per-building stock |
+| Ship Depot | Defines concurrent ship build **slots** (sum of levels); spawns ships (requires military presence) |
+| Warehouse | Adds shared **capacity** at the star (`level × 1` kt per warehouse) |
 | Sales Depot | Sells resources to government sink |
-| Garrison | Provides persistent military presence on the planet |
+| Garrison | Provides persistent military presence and **military power** (scaled by level and degradation) |
 | Radar | Reveals star system contents within X ly radius |
 
-### Mining
-- Scheduled reducer fires every X minutes
-- Deposits resources into a warehouse if capacity exists
-- Mining rate degrades proportionally with building degradation %
+### Star-system resources (warehouse / mining)
+
+- **No global mining ticks.** Production is **lazy**: amounts **materialize** only when something interacts (settlement path in reducers). Between interactions, the server stores **settled** kt, **`last_settled_at`**, and derives rates from buildings.
+- **Shared warehouse** per star `(star_x, star_y)`: **`settled: Vec<Material>`** (kt per species, merged to one row per [`MaterialKind`](universe/src/resources.rs)), shared **`capacity_kt`** and **`last_settled_at`** (see `star_system_stock` table). **Capacity** = sum over all warehouses of **`level × 1` kt** (level 1 warehouse ⇒ 1 kt contribution).
+- **Accrual:** per-kind rates aggregated into a map; `t_eff = min(Δt, remaining_kt / total_kt_s)` where **`remaining_kt = capacity − sum(settled)`** and **`total_kt_s`** is the sum of all miner rates at that star. If accrual would exceed capacity, amounts are **scaled proportionally** across materials. **Miner kt/s (per depot)** = `level × planet_richness × resource_richness × 0.01 × (1 − degradation)`; **resource_richness** is the vein multiplier on the targeted material.
+- **Settlement** runs before changing miners/warehouses or **collecting** to ship. **`collect_star_resources(ship_id, pickup: Vec<Material>)`** settles, then subtracts requested kt per kind from **`settled`** and merges into **ship cargo** (subject to cargo capacity). Shared helpers live in [`universe::material_stock`](universe/src/material_stock.rs).
+- **Military power** (abstract): sum over garrisons of `level × 100 × (1 − degradation)`.
 
 ---
 
@@ -217,10 +220,10 @@ Strike first risks starting fights with neutrals; bots must manage trust lists c
 
 ### DB Tables Needed
 - `Empire`
-- `Ship`
-- `Building` (type, level, degradation %, planet)
-- `Cargo` / warehouse contents
-- `Star` (written on first interaction — position is client-side, system data is DB)
+- `Ship` (includes **`cargo`**)
+- `Building` (type, level, degradation %, planet slot, mining target, …)
+- **`StarSystemStock`** (per star: settled kt per material, `last_settled_at`, cached `capacity_kt`)
+- `Star` (written on first interaction — position is client-side, system data is DB) — *optional vs procedural-only*
 - `ScanData` (what a given empire knows about a given star, with timestamp)
 
 ### Open Questions

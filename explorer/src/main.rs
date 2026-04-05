@@ -9,13 +9,16 @@ use egui::{Color32, Pos2, Sense, Vec2};
 use spacetimedb_sdk::{DbContext, Identity, Table};
 use spacetimedb_sdk::Timestamp;
 use vast_bindings::{
-    buildingQueryTableAccess, empireQueryTableAccess, order_warp, place_building, register_empire,
-    shipQueryTableAccess, spawn_starter_ship, upgrade_building, Building, BuildingKind,
-    BuildingTableAccess, DbConnection, Empire, EmpireTableAccess, Material, Ship, ShipAttackMode,
-    ShipLocation, ShipTableAccess,
+    buildingQueryTableAccess, collect_star_resources, empireQueryTableAccess, order_warp,
+    place_building, register_empire, shipQueryTableAccess, spawn_starter_ship, upgrade_building,
+    star_system_stockQueryTableAccess,
+    Building, BuildingKind, BuildingTableAccess, DbConnection, Empire, EmpireTableAccess, Material,
+    Ship, ShipAttackMode, ShipLocation, ShipTableAccess, StarSystemStock, StarSystemStockTableAccess,
 };
 use universe::generator::{generate_star, star_info_at, PlanetType, StarSystem, StarType};
+use universe::MaterialKind;
 use universe::parse_star_id;
+use universe::star_location_id;
 use universe::settings::{grid_to_ly, COORD_UNITS_PER_LY};
 use universe::star_display_id;
 use universe::ships::{compute_cost, ShipStats};
@@ -262,6 +265,13 @@ struct ExplorerApp {
     build_level: u32,
     build_mining_resource_index: u8,
     build_garrison_mode: ShipAttackMode,
+    /// Per [`MaterialKind::ALL`] — kt to load when collecting ([`collect_star_resources`]).
+    collect_pickup_kt: Vec<f64>,
+    /// Throttled DB scans for the selected-star side panel ([`Self::refresh_star_panel_cache_if_needed`]).
+    star_panel_cache_star: Option<(i32, i32)>,
+    star_panel_cache_time_secs: f64,
+    star_panel_cached_buildings: Vec<Building>,
+    star_panel_cached_stock: Option<StarSystemStock>,
 }
 
 impl eframe::App for ExplorerApp {
@@ -283,6 +293,10 @@ impl eframe::App for ExplorerApp {
             ctx.request_repaint();
         }
         self.sync_session(ctx);
+        // Keep `sync_session` / transit / star-economy math advancing while idle (not only on map input).
+        if matches!(self.current_tab, Tab::Universe) && self.conn.is_some() {
+            ctx.request_repaint();
+        }
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.current_tab, Tab::Universe, "🌌 Universe Explorer");
@@ -332,6 +346,17 @@ impl ExplorerApp {
             build_level: 1,
             build_mining_resource_index: 0,
             build_garrison_mode: ShipAttackMode::Defend,
+            collect_pickup_kt: {
+                let mut v = vec![0.0_f64; MaterialKind::ALL.len()];
+                if !v.is_empty() {
+                    v[0] = 1.0;
+                }
+                v
+            },
+            star_panel_cache_star: None,
+            star_panel_cache_time_secs: 0.0,
+            star_panel_cached_buildings: Vec::new(),
+            star_panel_cached_stock: None,
         };
         app
     }
@@ -370,6 +395,7 @@ impl ExplorerApp {
                     .add_query(|q| q.from.empire())
                     .add_query(|q| q.from.building())
                     .add_query(|q| q.from.ship())
+                    .add_query(|q| q.from.star_system_stock())
                     .subscribe();
             })
             .on_connect_error(|_ctx, e| {
@@ -393,7 +419,16 @@ impl ExplorerApp {
         let Some(conn) = &self.conn else {
             return;
         };
+        #[cfg(debug_assertions)]
+        let _frame_tick_t0 = std::time::Instant::now();
         let _ = conn.frame_tick();
+        #[cfg(debug_assertions)]
+        {
+            let ms = _frame_tick_t0.elapsed().as_secs_f64() * 1000.0;
+            if ms > 16.0 {
+                eprintln!("[vast explorer] frame_tick took {ms:.1} ms");
+            }
+        }
         let Some(id) = conn.try_identity() else {
             return;
         };
@@ -415,11 +450,49 @@ impl ExplorerApp {
         }
     }
 
+    /// Star side panel: `star_system_stock` row every frame (small table); full `building` scan throttled.
+    fn refresh_star_panel_cache_if_needed(
+        &mut self,
+        star_x: i32,
+        star_y: i32,
+        ctx: &egui::Context,
+    ) {
+        const BUILDINGS_POLL_SECS: f64 = 0.15;
+        let now_secs = ctx.input(|i| i.time);
+        let star_key = (star_x, star_y);
+        let Some(conn) = &self.conn else {
+            self.star_panel_cached_buildings.clear();
+            self.star_panel_cached_stock = None;
+            self.star_panel_cache_star = None;
+            return;
+        };
+        let sid_loc = star_location_id(star_x, star_y);
+        self.star_panel_cached_stock = conn
+            .db()
+            .star_system_stock()
+            .iter()
+            .find(|s| s.star_location_id == sid_loc);
+
+        let need_buildings = self.star_panel_cache_star != Some(star_key)
+            || now_secs - self.star_panel_cache_time_secs >= BUILDINGS_POLL_SECS;
+        if need_buildings {
+            self.star_panel_cached_buildings = conn
+                .db()
+                .building()
+                .iter()
+                .filter(|b| b.star_x == star_x && b.star_y == star_y)
+                .collect();
+            self.star_panel_cache_star = Some(star_key);
+            self.star_panel_cache_time_secs = now_secs;
+        }
+    }
+
     fn show_universe(&mut self, ctx: &egui::Context) {
         let cur_star = self.selected.as_ref().map(|s| (s.x, s.y));
         if self.prev_selected_star != cur_star {
             self.selected_ship_id = None;
             self.prev_selected_star = cur_star;
+            self.star_panel_cache_star = None;
         }
 
         if !self.game_ready() {
@@ -532,6 +605,11 @@ impl ExplorerApp {
                     egui::ScrollArea::vertical()
                         .id_salt("vast_star_sidepanel")
                         .show(ui, |ui| {
+                    let (star_x, star_y) = {
+                        let s = self.selected.as_ref().unwrap();
+                        (s.x, s.y)
+                    };
+                    self.refresh_star_panel_cache_if_needed(star_x, star_y, ctx);
                     let sys = self.selected.as_ref().unwrap();
                     ui.add_space(6.0);
                     ui.heading(format!(
@@ -733,17 +811,7 @@ impl ExplorerApp {
                     ui.separator();
                     ui.label(format!("{} planet(s)", sys.planets.len()));
 
-                    let buildings_at_star: Vec<Building> = self
-                        .conn
-                        .as_ref()
-                        .map(|c| {
-                            c.db()
-                                .building()
-                                .iter()
-                                .filter(|b| b.star_x == sys.x && b.star_y == sys.y)
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                    let buildings_at_star: &[Building] = &self.star_panel_cached_buildings;
                     let me = self.conn.as_ref().and_then(|c| c.try_identity());
 
                             for p in &sys.planets {
@@ -835,6 +903,171 @@ impl ExplorerApp {
                                     }
                                 }
                             }
+
+                    ui.separator();
+                    ui.heading("Star economy");
+                    {
+                        let cap_struct = building_economy::capacity_kt_at_star(&buildings_at_star);
+                        let rates =
+                            building_economy::mining_rates_kt_s(sys, &buildings_at_star);
+                        let mp = building_economy::military_power_at_star(&buildings_at_star);
+                        let ship_slots =
+                            building_economy::ship_build_slots_at_star(&buildings_at_star);
+                        ui.label(format!(
+                            "Warehouse capacity (from structures): {:.2} kt",
+                            cap_struct
+                        ));
+                        let rate_parts: Vec<String> = MaterialKind::ALL
+                            .iter()
+                            .map(|&k| {
+                                let r = rates.get(&k).copied().unwrap_or(0.0);
+                                let name = match k {
+                                    MaterialKind::Iron => "Iron",
+                                    MaterialKind::Helium => "Helium",
+                                };
+                                format!("{} {:.4}", name, r)
+                            })
+                            .collect();
+                        ui.label(format!(
+                            "Mining rates (kt/s): {}",
+                            rate_parts.join(", ")
+                        ));
+                        ui.label(format!("Military power (garrisons): {:.1}", mp));
+                        ui.label(format!("Concurrent ship build slots: {}", ship_slots));
+                        if let Some(st) = self.star_panel_cached_stock.as_ref() {
+                            let now = Timestamp::now();
+                            let stored_lines: Vec<String> = st
+                                .settled
+                                .iter()
+                                .map(|m| {
+                                    let (name, q) = match m {
+                                        Material::Iron(q) => ("Iron", *q),
+                                        Material::Helium(q) => ("Helium", *q),
+                                    };
+                                    format!("{} {:.2}", name, q)
+                                })
+                                .collect();
+                            let stored_txt = if stored_lines.is_empty() {
+                                "(empty)".to_string()
+                            } else {
+                                stored_lines.join(", ")
+                            };
+                            let tot =
+                                building_economy::theoretical_materials(
+                                    now,
+                                    st.last_settled_at,
+                                    &st.settled,
+                                    st.capacity_kt,
+                                    &rates,
+                                );
+                            let avail_lines: Vec<String> = tot
+                                .iter()
+                                .map(|m| {
+                                    format!("{} {:.2}", m.name(), m.multiplier())
+                                })
+                                .collect();
+                            let avail_txt = if avail_lines.is_empty() {
+                                "0.00 total".to_string()
+                            } else {
+                                avail_lines.join(", ")
+                            };
+                            ui.label(format!(
+                                "Stored (settled): {} | Row capacity {:.2} kt | total stored {:.2} kt",
+                                stored_txt,
+                                st.capacity_kt,
+                                building_economy::total_settled_kt_bindings(&st.settled),
+                            ));
+                            ui.label(format!(
+                                "Available (with accrual): {}",
+                                avail_txt
+                            ));
+                        } else {
+                            ui.label(
+                                egui::RichText::new(
+                                    "No stock row yet — place a building to run settlement.",
+                                )
+                                .weak(),
+                            );
+                        }
+                    }
+
+                    if self.game_ready() {
+                        if let Some(identity) = me {
+                            ui.separator();
+                            ui.heading("Collect from warehouse");
+                            let ships_docked: Vec<&Ship> = self
+                                .my_ships
+                                .iter()
+                                .filter(|s| {
+                                    s.owner == identity
+                                        && matches!(
+                                            &s.location,
+                                            ShipLocation::AtStar(loc)
+                                                if loc.star_x == sys.x && loc.star_y == sys.y
+                                        )
+                                })
+                                .collect();
+                            if ships_docked.is_empty() {
+                                ui.label(
+                                    egui::RichText::new("Station a ship here to load cargo.")
+                                        .weak(),
+                                );
+                            } else {
+                                for (i, &kind) in MaterialKind::ALL.iter().enumerate() {
+                                    let label = match kind {
+                                        MaterialKind::Iron => "Iron kt to load",
+                                        MaterialKind::Helium => "Helium kt to load",
+                                    };
+                                    if let Some(amt) = self.collect_pickup_kt.get_mut(i) {
+                                        ui.add(egui::Slider::new(
+                                            amt,
+                                            0.0..=1_000_000.0,
+                                        )
+                                        .text(label));
+                                    }
+                                }
+                                let ship_for_collect = self
+                                    .selected_ship_id
+                                    .filter(|sid| ships_docked.iter().any(|s| s.id == *sid))
+                                    .or_else(|| ships_docked.first().map(|s| s.id));
+                                if let Some(ship_id) = ship_for_collect {
+                                    if ui.button("Collect onto ship (uses ship selected above)")
+                                        .clicked()
+                                    {
+                                        if let Some(conn) = &self.conn {
+                                            let tx = self.toast_tx.clone();
+                                            let pickup = building_economy::pickup_vec_for_reducer(
+                                                &self.collect_pickup_kt,
+                                            );
+                                            if let Err(e) =
+                                                conn.reducers().collect_star_resources_then(
+                                                    ship_id,
+                                                    pickup,
+                                                    move |_, res| {
+                                                        let msg = match res {
+                                                            Ok(Ok(())) => "Collected.".into(),
+                                                            Ok(Err(err)) => {
+                                                                format!("Collect: {err}")
+                                                            }
+                                                            Err(err) => {
+                                                                format!("Collect failed: {err:?}")
+                                                            }
+                                                        };
+                                                        let _ = tx.send(msg);
+                                                    },
+                                                )
+                                            {
+                                                self.toast_message =
+                                                    Some(format!("Could not send collect: {e:?}"));
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    ui.label("Select a ship at this star in the list above.");
+                                }
+                            }
+                        }
+                    }
 
                     ui.separator();
                     ui.heading("Construction");

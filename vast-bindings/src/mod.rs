@@ -9,6 +9,7 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 pub mod building_kind_type;
 pub mod building_table;
 pub mod building_type;
+pub mod collect_star_resources_reducer;
 pub mod empire_table;
 pub mod empire_type;
 pub mod material_type;
@@ -23,12 +24,15 @@ pub mod ship_stats_type;
 pub mod ship_table;
 pub mod ship_type;
 pub mod spawn_starter_ship_reducer;
+pub mod star_system_stock_table;
+pub mod star_system_stock_type;
 pub mod upgrade_building_reducer;
 pub mod warp_job_type;
 
 pub use building_kind_type::BuildingKind;
 pub use building_table::*;
 pub use building_type::Building;
+pub use collect_star_resources_reducer::collect_star_resources;
 pub use empire_table::*;
 pub use empire_type::Empire;
 pub use material_type::Material;
@@ -43,6 +47,8 @@ pub use ship_stats_type::ShipStats;
 pub use ship_table::*;
 pub use ship_type::Ship;
 pub use spawn_starter_ship_reducer::spawn_starter_ship;
+pub use star_system_stock_table::*;
+pub use star_system_stock_type::StarSystemStock;
 pub use upgrade_building_reducer::upgrade_building;
 pub use warp_job_type::WarpJob;
 
@@ -54,6 +60,10 @@ pub use warp_job_type::WarpJob;
 /// to indicate which reducer caused the event.
 
 pub enum Reducer {
+    CollectStarResources {
+        ship_id: u64,
+        pickup: Vec<Material>,
+    },
     OrderWarp {
         ship_id: u64,
         dest_star_x: i32,
@@ -86,6 +96,7 @@ impl __sdk::InModule for Reducer {
 impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
+            Reducer::CollectStarResources { .. } => "collect_star_resources",
             Reducer::OrderWarp { .. } => "order_warp",
             Reducer::PlaceBuilding { .. } => "place_building",
             Reducer::RegisterEmpire { .. } => "register_empire",
@@ -97,6 +108,12 @@ impl __sdk::Reducer for Reducer {
     #[allow(clippy::clone_on_copy)]
     fn args_bsatn(&self) -> Result<Vec<u8>, __sats::bsatn::EncodeError> {
         match self {
+            Reducer::CollectStarResources { ship_id, pickup } => {
+                __sats::bsatn::to_vec(&collect_star_resources_reducer::CollectStarResourcesArgs {
+                    ship_id: ship_id.clone(),
+                    pickup: pickup.clone(),
+                })
+            }
             Reducer::OrderWarp {
                 ship_id,
                 dest_star_x,
@@ -152,6 +169,7 @@ pub struct DbUpdate {
     building: __sdk::TableUpdate<Building>,
     empire: __sdk::TableUpdate<Empire>,
     ship: __sdk::TableUpdate<Ship>,
+    star_system_stock: __sdk::TableUpdate<StarSystemStock>,
 }
 
 impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
@@ -169,6 +187,9 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
                 "ship" => db_update
                     .ship
                     .append(ship_table::parse_table_update(table_update)?),
+                "star_system_stock" => db_update
+                    .star_system_stock
+                    .append(star_system_stock_table::parse_table_update(table_update)?),
 
                 unknown => {
                     return Err(__sdk::InternalError::unknown_name(
@@ -204,6 +225,9 @@ impl __sdk::DbUpdate for DbUpdate {
         diff.ship = cache
             .apply_diff_to_table::<Ship>("ship", &self.ship)
             .with_updates_by_pk(|row| &row.id);
+        diff.star_system_stock = cache
+            .apply_diff_to_table::<StarSystemStock>("star_system_stock", &self.star_system_stock)
+            .with_updates_by_pk(|row| &row.star_location_id);
 
         diff
     }
@@ -219,6 +243,9 @@ impl __sdk::DbUpdate for DbUpdate {
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "ship" => db_update
                     .ship
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "star_system_stock" => db_update
+                    .star_system_stock
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 unknown => {
                     return Err(
@@ -242,6 +269,9 @@ impl __sdk::DbUpdate for DbUpdate {
                 "ship" => db_update
                     .ship
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "star_system_stock" => db_update
+                    .star_system_stock
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 unknown => {
                     return Err(
                         __sdk::InternalError::unknown_name("table", unknown, "QueryRows").into(),
@@ -260,6 +290,7 @@ pub struct AppliedDiff<'r> {
     building: __sdk::TableAppliedDiff<'r, Building>,
     empire: __sdk::TableAppliedDiff<'r, Empire>,
     ship: __sdk::TableAppliedDiff<'r, Ship>,
+    star_system_stock: __sdk::TableAppliedDiff<'r, StarSystemStock>,
     __unused: std::marker::PhantomData<&'r ()>,
 }
 
@@ -276,6 +307,11 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
         callbacks.invoke_table_row_callbacks::<Building>("building", &self.building, event);
         callbacks.invoke_table_row_callbacks::<Empire>("empire", &self.empire, event);
         callbacks.invoke_table_row_callbacks::<Ship>("ship", &self.ship, event);
+        callbacks.invoke_table_row_callbacks::<StarSystemStock>(
+            "star_system_stock",
+            &self.star_system_stock,
+            event,
+        );
     }
 }
 
@@ -939,6 +975,8 @@ impl __sdk::SpacetimeModule for RemoteModule {
         building_table::register_table(client_cache);
         empire_table::register_table(client_cache);
         ship_table::register_table(client_cache);
+        star_system_stock_table::register_table(client_cache);
     }
-    const ALL_TABLE_NAMES: &'static [&'static str] = &["building", "empire", "ship"];
+    const ALL_TABLE_NAMES: &'static [&'static str] =
+        &["building", "empire", "ship", "star_system_stock"];
 }

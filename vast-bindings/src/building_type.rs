@@ -20,7 +20,6 @@ pub struct Building {
     pub level: u32,
     pub degradation_percent: f32,
     pub mining_material: Option<Material>,
-    pub warehouse_inventory: Vec<Material>,
     pub owner: Option<__sdk::Identity>,
     pub attack_mode: Option<ShipAttackMode>,
 }
@@ -42,7 +41,6 @@ pub struct BuildingCols {
     pub level: __sdk::__query_builder::Col<Building, u32>,
     pub degradation_percent: __sdk::__query_builder::Col<Building, f32>,
     pub mining_material: __sdk::__query_builder::Col<Building, Option<Material>>,
-    pub warehouse_inventory: __sdk::__query_builder::Col<Building, Vec<Material>>,
     pub owner: __sdk::__query_builder::Col<Building, Option<__sdk::Identity>>,
     pub attack_mode: __sdk::__query_builder::Col<Building, Option<ShipAttackMode>>,
 }
@@ -63,10 +61,6 @@ impl __sdk::__query_builder::HasCols for Building {
                 "degradation_percent",
             ),
             mining_material: __sdk::__query_builder::Col::new(table_name, "mining_material"),
-            warehouse_inventory: __sdk::__query_builder::Col::new(
-                table_name,
-                "warehouse_inventory",
-            ),
             owner: __sdk::__query_builder::Col::new(table_name, "owner"),
             attack_mode: __sdk::__query_builder::Col::new(table_name, "attack_mode"),
         }

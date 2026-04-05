@@ -1,6 +1,7 @@
 //! Hardcoded building economy and ship-size gates (no closed-form level formula).
 
 use crate::BuildingKind;
+use universe::Material;
 
 /// Maximum building level supported by [`MIN_SHIP_KT_FOR_LEVEL`] and credit tables.
 pub const MAX_BUILDING_LEVEL: usize = 12;
@@ -51,4 +52,39 @@ pub fn credits_delta_upgrade(kind: BuildingKind, old_level: u32, new_level: u32)
 pub fn sales_depot_next_cost(existing_sales_depot_count: u32) -> u64 {
     let n = u32::min(existing_sales_depot_count, 62);
     1000u64.saturating_mul(1u64 << n)
+}
+
+/// Warehouse: kt capacity contributed by one building at `level` (`level × 1` kt).
+#[inline]
+#[must_use]
+pub fn warehouse_kt_capacity(level: u32) -> f64 {
+    f64::from(level)
+}
+
+/// Mining depot: kt/s = `level × planet_richness × resource_richness × 0.01`, scaled by degradation.
+#[must_use]
+pub fn mining_depot_rate_kt_s(
+    level: u32,
+    planet_richness: f64,
+    material: &Material,
+    degradation_percent: f32,
+) -> f64 {
+    let deg = (1.0 - (degradation_percent.clamp(0.0, 100.0) as f64 / 100.0)).max(0.0);
+    f64::from(level) * planet_richness * material.multiplier() * 0.01 * deg
+}
+
+/// Garrison military power (abstract units).
+#[allow(dead_code)] // used by explorer mirror; server combat reducers TBD
+#[must_use]
+pub fn garrison_power_units(level: u32, degradation_percent: f32) -> f64 {
+    let deg = (1.0 - (degradation_percent.clamp(0.0, 100.0) as f64 / 100.0)).max(0.0);
+    f64::from(level) * 100.0 * deg
+}
+
+/// Concurrent ship build slots for one ship depot.
+#[allow(dead_code)] // used by explorer mirror; server spawn reducer TBD
+#[inline]
+#[must_use]
+pub fn ship_depot_concurrent_slots(level: u32) -> u32 {
+    level
 }
