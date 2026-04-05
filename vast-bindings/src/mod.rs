@@ -13,6 +13,7 @@ pub mod empire_table;
 pub mod empire_type;
 pub mod material_type;
 pub mod order_warp_reducer;
+pub mod place_building_reducer;
 pub mod register_empire_reducer;
 pub mod ship_at_star_type;
 pub mod ship_attack_mode_type;
@@ -22,6 +23,7 @@ pub mod ship_stats_type;
 pub mod ship_table;
 pub mod ship_type;
 pub mod spawn_starter_ship_reducer;
+pub mod upgrade_building_reducer;
 pub mod warp_job_type;
 
 pub use building_kind_type::BuildingKind;
@@ -31,6 +33,7 @@ pub use empire_table::*;
 pub use empire_type::Empire;
 pub use material_type::Material;
 pub use order_warp_reducer::order_warp;
+pub use place_building_reducer::place_building;
 pub use register_empire_reducer::register_empire;
 pub use ship_at_star_type::ShipAtStar;
 pub use ship_attack_mode_type::ShipAttackMode;
@@ -40,6 +43,7 @@ pub use ship_stats_type::ShipStats;
 pub use ship_table::*;
 pub use ship_type::Ship;
 pub use spawn_starter_ship_reducer::spawn_starter_ship;
+pub use upgrade_building_reducer::upgrade_building;
 pub use warp_job_type::WarpJob;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -55,10 +59,24 @@ pub enum Reducer {
         dest_star_x: i32,
         dest_star_y: i32,
     },
+    PlaceBuilding {
+        star_x: i32,
+        star_y: i32,
+        planet_index: u8,
+        slot_index: u8,
+        kind: BuildingKind,
+        level: u32,
+        mining_resource_index: Option<u8>,
+        garrison_attack_mode: Option<ShipAttackMode>,
+    },
     RegisterEmpire {
         name: String,
     },
     SpawnStarterShip,
+    UpgradeBuilding {
+        building_id: u64,
+        new_level: u32,
+    },
 }
 
 impl __sdk::InModule for Reducer {
@@ -69,8 +87,10 @@ impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
             Reducer::OrderWarp { .. } => "order_warp",
+            Reducer::PlaceBuilding { .. } => "place_building",
             Reducer::RegisterEmpire { .. } => "register_empire",
             Reducer::SpawnStarterShip => "spawn_starter_ship",
+            Reducer::UpgradeBuilding { .. } => "upgrade_building",
             _ => unreachable!(),
         }
     }
@@ -86,6 +106,25 @@ impl __sdk::Reducer for Reducer {
                 dest_star_x: dest_star_x.clone(),
                 dest_star_y: dest_star_y.clone(),
             }),
+            Reducer::PlaceBuilding {
+                star_x,
+                star_y,
+                planet_index,
+                slot_index,
+                kind,
+                level,
+                mining_resource_index,
+                garrison_attack_mode,
+            } => __sats::bsatn::to_vec(&place_building_reducer::PlaceBuildingArgs {
+                star_x: star_x.clone(),
+                star_y: star_y.clone(),
+                planet_index: planet_index.clone(),
+                slot_index: slot_index.clone(),
+                kind: kind.clone(),
+                level: level.clone(),
+                mining_resource_index: mining_resource_index.clone(),
+                garrison_attack_mode: garrison_attack_mode.clone(),
+            }),
             Reducer::RegisterEmpire { name } => {
                 __sats::bsatn::to_vec(&register_empire_reducer::RegisterEmpireArgs {
                     name: name.clone(),
@@ -94,6 +133,13 @@ impl __sdk::Reducer for Reducer {
             Reducer::SpawnStarterShip => {
                 __sats::bsatn::to_vec(&spawn_starter_ship_reducer::SpawnStarterShipArgs {})
             }
+            Reducer::UpgradeBuilding {
+                building_id,
+                new_level,
+            } => __sats::bsatn::to_vec(&upgrade_building_reducer::UpgradeBuildingArgs {
+                building_id: building_id.clone(),
+                new_level: new_level.clone(),
+            }),
             _ => unreachable!(),
         }
     }
