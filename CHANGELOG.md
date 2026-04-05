@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **SpacetimeDB:** **`place_building`** and **`upgrade_building`** — instant placement on a **planet slot**; **stationed ship** at the star required (`AtStar` only); **hardcoded** min ship size (kt) per **level** (levels 1–12); credits per kind/level in [`spacetimedb/src/building_rules.rs`](spacetimedb/src/building_rules.rs). **SalesDepot:** owned (`owner` set), **no gameplay level** (stored `level` fixed at 1), price **`1000 × 2^n`** credits where **`n`** is how many Sales Depots you already own. **MiningDepot / Warehouse / ShipDepot:** **`owner` is `None`**. **Enemy military garrison** on a planet blocks **build and upgrade** there unless it is yours.
+- **Galaxy Explorer:** **Construction** section on the selected star — pick planet, slot, kind, level (except Sales Depot), place building; **upgrade +1** on listed structures; cost preview mirrors server rules ([`explorer/src/building_economy.rs`](explorer/src/building_economy.rs), keep in sync with `building_rules`).
+
 - **Galaxy Explorer:** ships **in transit** show a **cyan bubble** along the route line, interpolated from **`depart_at` / `arrive_at`** vs wall-clock time so you can see progress toward the destination.
 
 - **Galaxy Explorer:** SpacetimeDB session tokens are **per empire name** — e.g. `~/.cache/vast/explorer_tokens/<sanitized_name>.txt`. Enter the **same name** and **Connect** to resume that empire; a **new name** gets a fresh identity (then **Start** to register).
@@ -24,6 +27,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Galaxy Explorer:** **scroll wheel** over the star info side panel no longer **zooms the map** (zoom applies only when the cursor is over the map); the whole info panel uses **one vertical scroll** instead of nested scroll regions fighting each other.
+
 - **Explorer:** import **`spacetimedb_sdk::DbContext`** and generated **table / query** traits (`EmpireTableAccess`, `ShipTableAccess`, `empireQueryTableAccess`, …) so subscription and table iteration compile; use **`egui::TextEdit::singleline(...).desired_width(...)`** instead of chaining `desired_width` off `text_edit_singleline`’s response.
 - **Module (WASM / Rust 2024):** starter disk sampling uses **`ReducerContext::random`** instead of **`Rng::gen`** (reserved keyword in Rust 2024).
 
@@ -32,6 +37,8 @@ All notable changes to this project will be documented in this file.
 - **Galaxy Explorer** ([`explorer`](explorer/src/main.rs)): Universe map caches stars per 64×64 ly chunk instead of scanning every integer coordinate in view each frame; repaints only while panning, zooming, holding movement keys, or on pointer press (lower idle CPU).
 
 ### Breaking
+
+- **`building` index** renamed **`building_by_garrison_owner`** → **`building_by_owner`**. Republish with **`--clear-database`** if you rely on old client bindings. **`BuildingKind`** derives **`Copy`** for reducer ergonomics.
 
 - **Ship location:** docked ships use **`ShipLocation::AtStar` (`ShipAtStar { star_x, star_y }`)** only — **no `planet_index`**. Variant **`AtPlanet` / `ShipAtPlanet` removed**. Republish the module with **`spacetime publish ... --clear-database -y`** (or equivalent) so existing `ship` rows match the new `location` type.
 

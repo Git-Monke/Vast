@@ -1,3 +1,10 @@
+mod building_rules;
+
+use building_rules::{
+    credits_delta_upgrade, credits_for_leveled_place, min_ship_kt_for_level, sales_depot_next_cost,
+    MAX_BUILDING_LEVEL,
+};
+
 use spacetimedb::{
     Identity, ReducerContext, ScheduleAt, SpacetimeType, Table, TimeDuration, Timestamp,
 };
@@ -22,7 +29,7 @@ const MAX_STARTER_SAMPLE_ATTEMPTS: u32 = 4_096;
 const STARTER_LOCAL_GRID: i32 = 50;
 const STARTER_LOCAL_HALF: i32 = STARTER_LOCAL_GRID / 2;
 
-#[derive(SpacetimeType, Clone, Debug, PartialEq)]
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq)]
 pub enum BuildingKind {
     MiningDepot,
     Warehouse,
@@ -33,7 +40,7 @@ pub enum BuildingKind {
 
 /// Stable procedural planet key for hashing and logging (no `planet` table row).
 ///
-/// Bit layout (lossless for `i32` coordinates and `u8` planet sloAt):
+/// Bit layout (lossless for `i32` coordinates and `u8` planet slot):
 /// - Bits `0..32`: `star_x` reinterpreted as `u32` (two's complement bits).
 /// - Bits `32..64`: `star_y` reinterpreted as `u32`.
 /// - Bits `64..72`: `planet_index` as `u8`.
@@ -45,7 +52,7 @@ pub fn planet_location_id(star_x: i32, star_y: i32, planet_index: u8) -> u128 {
     let p = u128::from(planet_index);
     x | (y << 32) | (p << 64)
 }
-A
+
 #[spacetimedb::table(accessor = empire, public)]
 pub struct Empire {
     #[primary_key]
@@ -57,7 +64,7 @@ pub struct Empire {
 
 #[spacetimedb::table(
     accessor = building,
-    public,A
+    public,
     index(
         accessor = building_by_planet_location,
         btree(columns = [star_x, star_y, planet_index])
@@ -66,7 +73,7 @@ pub struct Empire {
         accessor = building_by_planet_slot,
         btree(columns = [star_x, star_y, planet_index, slot_index])
     ),
-    index(accessor = building_by_garrison_owner, btree(columns = [owner]))
+    index(accessor = building_by_owner, btree(columns = [owner]))
 )]
 pub struct Building {
     #[primary_key]
@@ -83,9 +90,9 @@ pub struct Building {
     mining_material: Option<Material>,
     /// Stock per species; `f64` is quantity in units (not procedural richness).
     warehouse_inventory: Vec<Material>,
-    /// Military garrison only: empire that operates this garrison. Must be `None` for other kinds.
-    owner: Option<Identity>,A
-    /// Military garrison only: same semantics as [`Ship::attack_mode`]. Must be `None` for other kinds.
+    /// [`Some`] for **SalesDepot** (owner empire) and **MilitaryGarrison** (operator). **`None`** for unowned kinds (miner, warehouse, ship depot).
+    owner: Option<Identity>,
+    /// **MilitaryGarrison** only: combat posture. Must be `None` for other kinds.
     attack_mode: Option<ShipAttackMode>,
 }
 
@@ -136,7 +143,7 @@ pub fn identity_disconnected(_ctx: &ReducerContext) {
     // Called everytime a client disconnects
 }
 
-#[spacetimedb::reducer]A
+#[spacetimedb::reducer]
 pub fn register_empire(ctx: &ReducerContext, name: String) -> Result<(), String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -174,6 +181,101 @@ pub fn register_empire(ctx: &ReducerContext, name: String) -> Result<(), String>
 
 fn owner_has_any_ship(ctx: &ReducerContext, owner: Identity) -> bool {
     ctx.db.ship().iter().any(|s| s.owner == owner)
+}
+
+fn planet_has_enemy_garrison(
+    ctx: &ReducerContext,
+    star_x: i32,
+    star_y: i32,
+    planet_index: u8,
+    sender: Identity,
+) -> bool {
+    ctx.db.building().iter().any(|b| {
+        b.star_x == star_x
+            && b.star_y == star_y
+            && b.planet_index == planet_index
+            && b.kind == BuildingKind::MilitaryGarrison
+            && b.owner != Some(sender)
+    })
+}
+
+fn player_has_stationed_ship_at_star(
+    ctx: &ReducerContext,
+    star_x: i32,
+    star_y: i32,
+    sender: Identity,
+) -> bool {
+    ctx.db.ship().iter().any(|s| {
+        s.owner == sender
+            && matches!(
+                &s.location,
+                ShipLocation::AtStar(loc) if loc.star_x == star_x && loc.star_y == star_y
+            )
+    })
+}
+
+fn max_ship_size_kt_at_star(
+    ctx: &ReducerContext,
+    star_x: i32,
+    star_y: i32,
+    sender: Identity,
+) -> u32 {
+    ctx.db
+        .ship()
+        .iter()
+        .filter(|s| {
+            s.owner == sender
+                && matches!(
+                    &s.location,
+                    ShipLocation::AtStar(loc) if loc.star_x == star_x && loc.star_y == star_y
+                )
+        })
+        .map(|s| s.stats.size_kt)
+        .max()
+        .unwrap_or(0)
+}
+
+fn count_sales_depots_owned(ctx: &ReducerContext, owner: Identity) -> u32 {
+    ctx.db
+        .building()
+        .iter()
+        .filter(|b| b.kind == BuildingKind::SalesDepot && b.owner == Some(owner))
+        .count() as u32
+}
+
+fn slot_occupied(
+    ctx: &ReducerContext,
+    star_x: i32,
+    star_y: i32,
+    planet_index: u8,
+    slot_index: u8,
+) -> bool {
+    ctx.db.building().iter().any(|b| {
+        b.star_x == star_x
+            && b.star_y == star_y
+            && b.planet_index == planet_index
+            && b.slot_index == slot_index
+    })
+}
+
+fn deduct_credits(ctx: &ReducerContext, amount: u64) -> Result<(), String> {
+    let emp = ctx
+        .db
+        .empire()
+        .identity()
+        .find(ctx.sender())
+        .ok_or_else(|| "Register an empire first".to_string())?;
+    if emp.credits < amount {
+        return Err(format!(
+            "Insufficient credits (need {}, have {})",
+            amount, emp.credits
+        ));
+    }
+    ctx.db.empire().identity().update(Empire {
+        credits: emp.credits - amount,
+        ..emp
+    });
+    Ok(())
 }
 
 fn planet_has_any_building(
@@ -388,6 +490,188 @@ pub fn complete_warp(ctx: &ReducerContext, job: WarpJob) -> Result<(), String> {
         }),
         jump_ready_at,
         ..ship
+    });
+
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn place_building(
+    ctx: &ReducerContext,
+    star_x: i32,
+    star_y: i32,
+    planet_index: u8,
+    slot_index: u8,
+    kind: BuildingKind,
+    level: u32,
+    mining_resource_index: Option<u8>,
+    garrison_attack_mode: Option<ShipAttackMode>,
+) -> Result<(), String> {
+    if ctx.db.empire().identity().find(ctx.sender()).is_none() {
+        return Err("Register an empire first".to_string());
+    }
+
+    let Some(sys) = generate_star(star_x, star_y) else {
+        return Err("No star system at these coordinates".to_string());
+    };
+
+    let Some(planet) = sys.planets.iter().find(|p| p.index == planet_index) else {
+        return Err("Invalid planet index for this system".to_string());
+    };
+
+    if planet_has_enemy_garrison(ctx, star_x, star_y, planet_index, ctx.sender()) {
+        return Err("Enemy military garrison controls this planet".to_string());
+    }
+
+    if !player_has_stationed_ship_at_star(ctx, star_x, star_y, ctx.sender()) {
+        return Err("You need a ship stationed at this star (not in transit)".to_string());
+    }
+
+    if slot_index >= planet.size {
+        return Err("Slot index out of range for this planet".to_string());
+    }
+
+    if slot_occupied(ctx, star_x, star_y, planet_index, slot_index) {
+        return Err("That building slot is already occupied".to_string());
+    }
+
+    let max_kt = max_ship_size_kt_at_star(ctx, star_x, star_y, ctx.sender());
+
+    let (cost, owner, eff_level, mining_mat, attack_mode) = match kind {
+        BuildingKind::SalesDepot => {
+            let n = count_sales_depots_owned(ctx, ctx.sender());
+            let c = sales_depot_next_cost(n);
+            (c, Some(ctx.sender()), 1_u32, None, None)
+        }
+        BuildingKind::MiningDepot => {
+            let lv = level;
+            if lv < 1 || lv as usize > MAX_BUILDING_LEVEL {
+                return Err(format!("Level must be 1..={MAX_BUILDING_LEVEL}"));
+            }
+            let need = min_ship_kt_for_level(lv);
+            if max_kt < need {
+                return Err(format!(
+                    "Need a ship of at least {need} kt at this star (largest here: {max_kt} kt)"
+                ));
+            }
+            let ri =
+                mining_resource_index.ok_or_else(|| "Mining depot requires a resource index")?;
+            let mat = planet
+                .resources
+                .get(ri as usize)
+                .cloned()
+                .ok_or_else(|| "Invalid resource index for this planet".to_string())?;
+            let c = credits_for_leveled_place(kind, lv)
+                .ok_or_else(|| "Invalid level for this building kind".to_string())?;
+            (c, None, lv, Some(mat), None)
+        }
+        BuildingKind::Warehouse | BuildingKind::ShipDepot => {
+            let lv = level;
+            if lv < 1 || lv as usize > MAX_BUILDING_LEVEL {
+                return Err(format!("Level must be 1..={MAX_BUILDING_LEVEL}"));
+            }
+            let need = min_ship_kt_for_level(lv);
+            if max_kt < need {
+                return Err(format!(
+                    "Need a ship of at least {need} kt at this star (largest here: {max_kt} kt)"
+                ));
+            }
+            let c = credits_for_leveled_place(kind, lv)
+                .ok_or_else(|| "Invalid level for this building kind".to_string())?;
+            (c, None, lv, None, None)
+        }
+        BuildingKind::MilitaryGarrison => {
+            let lv = level;
+            if lv < 1 || lv as usize > MAX_BUILDING_LEVEL {
+                return Err(format!("Level must be 1..={MAX_BUILDING_LEVEL}"));
+            }
+            let need = min_ship_kt_for_level(lv);
+            if max_kt < need {
+                return Err(format!(
+                    "Need a ship of at least {need} kt at this star (largest here: {max_kt} kt)"
+                ));
+            }
+            let c = credits_for_leveled_place(kind, lv)
+                .ok_or_else(|| "Invalid level for this building kind".to_string())?;
+            let am = garrison_attack_mode
+                .ok_or_else(|| "Military garrison requires attack mode".to_string())?;
+            (c, Some(ctx.sender()), lv, None, Some(am))
+        }
+    };
+
+    deduct_credits(ctx, cost)?;
+
+    ctx.db.building().insert(Building {
+        id: 0,
+        star_x,
+        star_y,
+        planet_index,
+        slot_index,
+        kind,
+        level: eff_level,
+        degradation_percent: 0.0,
+        mining_material: mining_mat,
+        warehouse_inventory: vec![],
+        owner,
+        attack_mode,
+    });
+
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn upgrade_building(ctx: &ReducerContext, building_id: u64, new_level: u32) -> Result<(), String> {
+    if ctx.db.empire().identity().find(ctx.sender()).is_none() {
+        return Err("Register an empire first".to_string());
+    }
+
+    let b = ctx
+        .db
+        .building()
+        .id()
+        .find(&building_id)
+        .ok_or_else(|| "Building not found".to_string())?;
+
+    if b.kind == BuildingKind::SalesDepot {
+        return Err("Sales depots do not have upgradeable levels".to_string());
+    }
+
+    if new_level <= b.level {
+        return Err("New level must be greater than current level".to_string());
+    }
+
+    if new_level as usize > MAX_BUILDING_LEVEL {
+        return Err(format!("Level must be at most {MAX_BUILDING_LEVEL}"));
+    }
+
+    if planet_has_enemy_garrison(ctx, b.star_x, b.star_y, b.planet_index, ctx.sender()) {
+        return Err("Enemy military garrison controls this planet".to_string());
+    }
+
+    if !player_has_stationed_ship_at_star(ctx, b.star_x, b.star_y, ctx.sender()) {
+        return Err("You need a ship stationed at this star (not in transit)".to_string());
+    }
+
+    let max_kt = max_ship_size_kt_at_star(ctx, b.star_x, b.star_y, ctx.sender());
+    let need = min_ship_kt_for_level(new_level);
+    if max_kt < need {
+        return Err(format!(
+            "Need a ship of at least {need} kt at this star (largest here: {max_kt} kt)"
+        ));
+    }
+
+    if b.kind == BuildingKind::MilitaryGarrison && b.owner != Some(ctx.sender()) {
+        return Err("Not your military garrison".to_string());
+    }
+
+    let delta = credits_delta_upgrade(b.kind, b.level, new_level)
+        .ok_or_else(|| "Invalid upgrade".to_string())?;
+
+    deduct_credits(ctx, delta)?;
+
+    ctx.db.building().id().update(Building {
+        level: new_level,
+        ..b
     });
 
     Ok(())

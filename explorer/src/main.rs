@@ -1,15 +1,18 @@
+mod building_economy;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
 use eframe::egui;
 use egui::{Color32, Pos2, Sense, Vec2};
-use spacetimedb_sdk::{DbContext, Table};
+use spacetimedb_sdk::{DbContext, Identity, Table};
 use spacetimedb_sdk::Timestamp;
 use vast_bindings::{
-    buildingQueryTableAccess, empireQueryTableAccess, order_warp, register_empire,
-    shipQueryTableAccess, spawn_starter_ship, DbConnection, Empire, EmpireTableAccess, Material,
-    Ship, ShipAttackMode, ShipLocation, ShipTableAccess,
+    buildingQueryTableAccess, empireQueryTableAccess, order_warp, place_building, register_empire,
+    shipQueryTableAccess, spawn_starter_ship, upgrade_building, Building, BuildingKind,
+    BuildingTableAccess, DbConnection, Empire, EmpireTableAccess, Material, Ship, ShipAttackMode,
+    ShipLocation, ShipTableAccess,
 };
 use universe::generator::{generate_star, star_info_at, PlanetType, StarSystem, StarType};
 use universe::parse_star_id;
@@ -24,6 +27,36 @@ const ZOOM_MAX: f64 = 400.0; // pixels per light-year (max zoom in)
 const MAX_SCREEN_HALF_PX: f64 = 2000.0;
 /// Chunk side length in **grid units** (tenths of a ly). 640 = 64 ly per chunk side.
 const CHUNK_SIZE: i32 = 64 * COORD_UNITS_PER_LY;
+
+fn max_stationed_kt(ships: &[Ship], owner: Identity, sx: i32, sy: i32) -> u32 {
+    ships
+        .iter()
+        .filter(|s| s.owner == owner)
+        .filter_map(|s| match &s.location {
+            ShipLocation::AtStar(loc) if loc.star_x == sx && loc.star_y == sy => {
+                Some(s.stats.size_kt)
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn planet_has_enemy_garrison(buildings: &[Building], planet_index: u8, me: Identity) -> bool {
+    buildings.iter().any(|b| {
+        b.planet_index == planet_index
+            && b.kind == BuildingKind::MilitaryGarrison
+            && b.owner != Some(me)
+    })
+}
+
+fn count_my_sales_depots(conn: &DbConnection, me: Identity) -> u32 {
+    conn.db()
+        .building()
+        .iter()
+        .filter(|b| b.kind == BuildingKind::SalesDepot && b.owner == Some(me))
+        .count() as u32
+}
 
 #[derive(Clone, Copy)]
 struct CachedStar {
@@ -221,6 +254,14 @@ struct ExplorerApp {
     selected_ship_id: Option<u64>,
     /// Clears [`Self::selected_ship_id`] when the user selects a different star system.
     prev_selected_star: Option<(i32, i32)>,
+    /// Construction form (selected star panel).
+    build_planet_index: u8,
+    /// Slot index for construction (`egui` sliders use `u32`).
+    build_slot: u32,
+    build_kind: BuildingKind,
+    build_level: u32,
+    build_mining_resource_index: u8,
+    build_garrison_mode: ShipAttackMode,
 }
 
 impl eframe::App for ExplorerApp {
@@ -285,6 +326,12 @@ impl ExplorerApp {
             did_center_camera: false,
             selected_ship_id: None,
             prev_selected_star: None,
+            build_planet_index: 0,
+            build_slot: 0,
+            build_kind: BuildingKind::MiningDepot,
+            build_level: 1,
+            build_mining_resource_index: 0,
+            build_garrison_mode: ShipAttackMode::Defend,
         };
         app
     }
@@ -482,6 +529,9 @@ impl ExplorerApp {
             egui::SidePanel::right("info")
                 .min_width(300.0)
                 .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("vast_star_sidepanel")
+                        .show(ui, |ui| {
                     let sys = self.selected.as_ref().unwrap();
                     ui.add_space(6.0);
                     ui.heading(format!(
@@ -521,10 +571,7 @@ impl ExplorerApp {
                                 .weak(),
                         );
                     } else {
-                        egui::ScrollArea::vertical()
-                            .max_height(220.0)
-                            .show(ui, |ui| {
-                                for ship in ships_here {
+                        for ship in ships_here {
                                     let is_sel = self.selected_ship_id == Some(ship.id);
                                     egui::Frame::group(ui.style())
                                         .stroke(egui::Stroke::new(
@@ -632,9 +679,8 @@ impl ExplorerApp {
                                                 }
                                             }
                                         });
-                                    });
-                                }
-                            });
+                                        });
+                        }
                     }
                     ui.separator();
                     ui.heading("Warp");
@@ -686,31 +732,288 @@ impl ExplorerApp {
                     });
                     ui.separator();
                     ui.label(format!("{} planet(s)", sys.planets.len()));
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        for p in &sys.planets {
-                            ui.add_space(4.0);
-                            let type_label = match p.planet_type {
-                                PlanetType::Solid => "Solid",
-                                PlanetType::Ocean => "Ocean",
-                                PlanetType::Gas => "Gas",
-                            };
-                            ui.label(
-                                egui::RichText::new(format!("▸ Planet {}", p.index + 1)).strong(),
-                            );
-                            ui.label(format!("  Type:     {}", type_label));
-                            ui.label(format!("  Distance: {:.2} AU", p.distance_au));
-                            ui.label(format!("  Temp:     {:.0} K", p.temperature_k));
-                            ui.label(format!("  Slots:    {}", p.size));
-                            ui.label(format!("  Richness: {:.2}×", p.richness));
-                            for res in &p.resources {
-                                ui.label(format!("  {}:  {:.2}×", res.name(), res.multiplier()));
+
+                    let buildings_at_star: Vec<Building> = self
+                        .conn
+                        .as_ref()
+                        .map(|c| {
+                            c.db()
+                                .building()
+                                .iter()
+                                .filter(|b| b.star_x == sys.x && b.star_y == sys.y)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let me = self.conn.as_ref().and_then(|c| c.try_identity());
+
+                            for p in &sys.planets {
+                                ui.add_space(4.0);
+                                let type_label = match p.planet_type {
+                                    PlanetType::Solid => "Solid",
+                                    PlanetType::Ocean => "Ocean",
+                                    PlanetType::Gas => "Gas",
+                                };
+                                ui.label(
+                                    egui::RichText::new(format!("▸ Planet {}", p.index + 1))
+                                        .strong(),
+                                );
+                                ui.label(format!("  Type:     {}", type_label));
+                                ui.label(format!("  Distance: {:.2} AU", p.distance_au));
+                                ui.label(format!("  Temp:     {:.0} K", p.temperature_k));
+                                ui.label(format!("  Slots:    {}", p.size));
+                                ui.label(format!("  Richness: {:.2}×", p.richness));
+                                for res in &p.resources {
+                                    ui.label(format!(
+                                        "  {}:  {:.2}×",
+                                        res.name(),
+                                        res.multiplier()
+                                    ));
+                                }
+                                let on_planet: Vec<&Building> = buildings_at_star
+                                    .iter()
+                                    .filter(|b| b.planet_index == p.index)
+                                    .collect();
+                                if !on_planet.is_empty() {
+                                    ui.label("  Structures:");
+                                    for b in on_planet {
+                                        ui.horizontal(|ui| {
+                                            ui.label(format!(
+                                                "    {:?}  L{}  slot {}",
+                                                b.kind, b.level, b.slot_index
+                                            ));
+                                            if let Some(o) = b.owner {
+                                                let short = format!("{:?}", o);
+                                                let short = short.chars().take(12).collect::<String>();
+                                                ui.label(egui::RichText::new(short).small());
+                                            }
+                                            if b.kind != BuildingKind::SalesDepot
+                                                && me.is_some()
+                                                && b.level
+                                                    < building_economy::MAX_BUILDING_LEVEL as u32
+                                            {
+                                                if ui.small_button("Upgrade +1").clicked() {
+                                                    if let Some(conn) = &self.conn {
+                                                        let tx = self.toast_tx.clone();
+                                                        let id = b.id;
+                                                        let nl = b.level + 1;
+                                                        if let Err(e) =
+                                                            conn.reducers().upgrade_building_then(
+                                                                id,
+                                                                nl,
+                                                                move |_, res| {
+                                                                    let msg = match res {
+                                                                        Ok(Ok(())) => {
+                                                                            "Upgraded.".into()
+                                                                        }
+                                                                        Ok(Err(err)) => {
+                                                                            format!("Upgrade: {err}")
+                                                                        }
+                                                                        Err(err) => format!(
+                                                                            "Upgrade failed: {err:?}"
+                                                                        ),
+                                                                    };
+                                                                    let _ = tx.send(msg);
+                                                                },
+                                                            )
+                                                        {
+                                                            self.toast_message = Some(format!(
+                                                                "Could not send upgrade: {e:?}"
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                                if let Some(id) = me {
+                                    if planet_has_enemy_garrison(&buildings_at_star, p.index, id) {
+                                        ui.colored_label(
+                                            Color32::from_rgb(255, 120, 120),
+                                            "  Enemy garrison — you cannot build or upgrade on this planet.",
+                                        );
+                                    }
+                                }
+                            }
+
+                    ui.separator();
+                    ui.heading("Construction");
+                    if !self.game_ready() {
+                        ui.label(
+                            egui::RichText::new("Register and spawn a ship to place buildings.")
+                                .weak(),
+                        );
+                    } else if let (Some(conn), Some(identity)) = (&self.conn, me) {
+                        let max_kt =
+                            max_stationed_kt(&self.my_ships, identity, sys.x, sys.y);
+                        ui.label(format!(
+                            "Your largest ship at this star: {} kt (stationed only)",
+                            max_kt
+                        ));
+                        egui::ComboBox::from_id_salt("vast_bp")
+                            .selected_text(format!("Planet {}", self.build_planet_index + 1))
+                            .show_ui(ui, |ui| {
+                                for p in &sys.planets {
+                                    ui.selectable_value(
+                                        &mut self.build_planet_index,
+                                        p.index,
+                                        format!("Planet {} ({} slots)", p.index + 1, p.size),
+                                    );
+                                }
+                            });
+                        if let Some(planet) =
+                            sys.planets.iter().find(|p| p.index == self.build_planet_index)
+                        {
+                            let max_slot = planet.size.saturating_sub(1) as u32;
+                            if self.build_slot > max_slot {
+                                self.build_slot = max_slot;
+                            }
+                            if planet_has_enemy_garrison(
+                                &buildings_at_star,
+                                planet.index,
+                                identity,
+                            ) {
+                                ui.colored_label(
+                                    Color32::from_rgb(255, 120, 120),
+                                    "Enemy garrison blocks construction on this planet.",
+                                );
+                            } else {
+                                ui.add(
+                                    egui::Slider::new(&mut self.build_slot, 0..=max_slot)
+                                        .text("Slot index"),
+                                );
+                                egui::ComboBox::from_id_salt("vast_bk")
+                                    .selected_text(format!("{:?}", self.build_kind))
+                                    .show_ui(ui, |ui| {
+                                        for k in [
+                                            BuildingKind::MiningDepot,
+                                            BuildingKind::Warehouse,
+                                            BuildingKind::MilitaryGarrison,
+                                            BuildingKind::SalesDepot,
+                                            BuildingKind::ShipDepot,
+                                        ] {
+                                            ui.selectable_value(
+                                                &mut self.build_kind,
+                                                k,
+                                                format!("{k:?}"),
+                                            );
+                                        }
+                                    });
+                                if self.build_kind == BuildingKind::SalesDepot {
+                                    let n = count_my_sales_depots(conn, identity);
+                                    let c = building_economy::sales_depot_next_cost(n);
+                                    ui.label(format!(
+                                        "Next Sales Depot cost: {} cr (you already own {})",
+                                        format_large_number(c),
+                                        n
+                                    ));
+                                } else {
+                                    ui.add(egui::Slider::new(
+                                        &mut self.build_level,
+                                        1..=building_economy::MAX_BUILDING_LEVEL as u32,
+                                    )
+                                    .text("Level"));
+                                    let need = building_economy::min_ship_kt_for_level(
+                                        self.build_level,
+                                    );
+                                    ui.label(format!(
+                                        "Requires stationed ship >= {} kt",
+                                        need
+                                    ));
+                                    if let Some(cost) = building_economy::credits_for_leveled_place(
+                                        self.build_kind,
+                                        self.build_level,
+                                    ) {
+                                        ui.label(format!(
+                                            "Cost: {} cr",
+                                            format_large_number(cost)
+                                        ));
+                                    }
+                                }
+                                if self.build_kind == BuildingKind::MiningDepot
+                                    && !planet.resources.is_empty()
+                                {
+                                    let ri_max =
+                                        (planet.resources.len() - 1).min(u8::MAX as usize) as u8;
+                                    ui.add(
+                                        egui::Slider::new(
+                                            &mut self.build_mining_resource_index,
+                                            0..=ri_max,
+                                        )
+                                        .text("Resource index"),
+                                    );
+                                }
+                                if self.build_kind == BuildingKind::MilitaryGarrison {
+                                    egui::ComboBox::from_id_salt("vast_bg")
+                                        .selected_text(format!("{:?}", self.build_garrison_mode))
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut self.build_garrison_mode,
+                                                ShipAttackMode::Defend,
+                                                "Defend",
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.build_garrison_mode,
+                                                ShipAttackMode::StrikeFirst,
+                                                "StrikeFirst",
+                                            );
+                                        });
+                                }
+                                if ui.button("Place building").clicked() {
+                                    self.toast_message = None;
+                                    let tx = self.toast_tx.clone();
+                                    let sx = sys.x;
+                                    let sy = sys.y;
+                                    let pi = self.build_planet_index;
+                                    let sl = self.build_slot as u8;
+                                    let k = self.build_kind;
+                                    let lvl = if k == BuildingKind::SalesDepot {
+                                        1
+                                    } else {
+                                        self.build_level
+                                    };
+                                    let mi = if k == BuildingKind::MiningDepot {
+                                        Some(self.build_mining_resource_index)
+                                    } else {
+                                        None
+                                    };
+                                    let ga = if k == BuildingKind::MilitaryGarrison {
+                                        Some(self.build_garrison_mode)
+                                    } else {
+                                        None
+                                    };
+                                    if let Err(e) = conn.reducers().place_building_then(
+                                        sx,
+                                        sy,
+                                        pi,
+                                        sl,
+                                        k,
+                                        lvl,
+                                        mi,
+                                        ga,
+                                        move |_, res| {
+                                            let msg = match res {
+                                                Ok(Ok(())) => "Building placed.".to_string(),
+                                                Ok(Err(err)) => format!("Build: {err}"),
+                                                Err(err) => format!("Build failed: {err:?}"),
+                                            };
+                                            let _ = tx.send(msg);
+                                        },
+                                    ) {
+                                        self.toast_message =
+                                            Some(format!("Could not send build: {e:?}"));
+                                    }
+                                }
                             }
                         }
-                    });
+                    } else {
+                        ui.label("Connect to place buildings.");
+                    }
                     ui.add_space(4.0);
                     if ui.button("Close").clicked() {
                         self.selected = None;
                     }
+                        });
                 });
         }
 
@@ -729,10 +1032,14 @@ impl ExplorerApp {
                     self.camera_y -= delta.y as f64 / self.zoom;
                 }
 
-                // Scroll to zoom, centred on cursor
-                let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-                if scroll != 0.0 {
-                    let factor = (scroll as f64 * 0.004).exp();
+                // Scroll to zoom only when the pointer is over the map (not side/top panels).
+                let map_scroll = if response.hovered() {
+                    ctx.input(|i| i.smooth_scroll_delta.y)
+                } else {
+                    0.0
+                };
+                if map_scroll != 0.0 {
+                    let factor = (map_scroll as f64 * 0.004).exp();
                     self.zoom = (self.zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
                 }
 
@@ -1002,8 +1309,9 @@ impl ExplorerApp {
                         || i.key_down(egui::Key::ArrowDown)
                         || i.key_down(egui::Key::S)
                 });
+                let any_scroll = ctx.input(|i| i.smooth_scroll_delta.y != 0.0);
                 if response.dragged()
-                    || scroll != 0.0
+                    || any_scroll
                     || pan_keys
                     || ctx.input(|i| i.pointer.any_pressed())
                 {
