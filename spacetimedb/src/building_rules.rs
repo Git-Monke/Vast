@@ -24,6 +24,7 @@ pub fn credits_for_leveled_place(kind: BuildingKind, level: u32) -> Option<u64> 
         BuildingKind::MilitaryGarrison => 600,
         BuildingKind::ShipDepot => 300,
         BuildingKind::SalesDepot => return None,
+        BuildingKind::Radar => 200,
     };
     let lv = l as u64;
     Some(base.saturating_mul(lv.saturating_mul(lv)))

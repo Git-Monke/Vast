@@ -1,7 +1,7 @@
 use crate::{
     checker::star_is_at_point,
     hasher::{point_hash, point_to_random},
-    resources::{collect_materials, Material},
+    resources::{Material, collect_materials},
 };
 
 const STAR_TYPE_SEED: u64 = 0x1111_1111_1111_1111;
@@ -82,6 +82,7 @@ impl StarType {
     }
 }
 
+#[cfg_attr(feature = "spacetimedb", derive(spacetimedb::SpacetimeType))]
 #[derive(Clone, Copy, Debug)]
 pub enum PlanetType {
     Solid,
@@ -98,6 +99,7 @@ pub struct StarSystem {
     pub planets: Vec<Planet>,
 }
 
+#[derive(Clone, Debug)]
 pub struct Planet {
     pub index: u8,
     pub name: String,

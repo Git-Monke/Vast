@@ -1,16 +1,16 @@
 use spacetimedb::{ReducerContext, Table};
 
-use crate::{building, empire};
 use crate::building_rules::{
     credits_delta_upgrade, credits_for_leveled_place, min_ship_kt_for_level, sales_depot_next_cost,
 };
 use crate::buildling_settings::MAX_BUILDING_LEVEL;
 use crate::star_economy::settle_star_resources;
+use crate::{building, empire};
 use universe::generator::generate_star;
 
 use crate::db_helpers::{
-    count_sales_depots_owned, deduct_credits, max_ship_size_kt_at_star,
-    planet_has_enemy_garrison, player_has_stationed_ship_at_star, slot_occupied,
+    count_sales_depots_owned, deduct_credits, max_ship_size_kt_at_star, planet_has_enemy_garrison,
+    player_has_stationed_ship_at_star, slot_occupied,
 };
 use crate::{Building, BuildingKind};
 use universe::ShipAttackMode;
@@ -85,7 +85,7 @@ pub fn place_building(
                 .ok_or_else(|| "Invalid level for this building kind".to_string())?;
             (c, None, lv, Some(mat), None, 0)
         }
-        BuildingKind::Warehouse | BuildingKind::ShipDepot => {
+        BuildingKind::Warehouse | BuildingKind::ShipDepot | BuildingKind::Radar => {
             let lv = level;
             if lv < 1 || lv as usize > MAX_BUILDING_LEVEL {
                 return Err(format!("Level must be 1..={MAX_BUILDING_LEVEL}"));

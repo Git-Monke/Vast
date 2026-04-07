@@ -8,6 +8,7 @@ pub enum BuildingKind {
     MilitaryGarrison,
     SalesDepot,
     ShipDepot,
+    Radar,
 }
 
 /// Stable procedural planet key for hashing and logging (no `planet` table row).
