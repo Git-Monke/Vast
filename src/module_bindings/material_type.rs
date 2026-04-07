@@ -6,11 +6,12 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
-pub struct ShipAtStar {
-    pub star_x: i32,
-    pub star_y: i32,
+pub enum Material {
+    Iron(f64),
+
+    Helium(f64),
 }
 
-impl __sdk::InModule for ShipAtStar {
+impl __sdk::InModule for Material {
     type Module = super::RemoteModule;
 }

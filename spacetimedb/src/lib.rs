@@ -1,22 +1,28 @@
+mod battle;
 mod building_rules;
+mod buildling_settings;
 mod star_economy;
+
+use std::collections::HashMap;
 
 use building_rules::{
     credits_delta_upgrade, credits_for_leveled_place, min_ship_kt_for_level, sales_depot_next_cost,
-    MAX_BUILDING_LEVEL,
 };
+use buildling_settings::MAX_BUILDING_LEVEL;
 use star_economy::{cargo_total_kt, settle_star_resources};
 
 use spacetimedb::{
     Identity, ReducerContext, ScheduleAt, SpacetimeType, Table, TimeDuration, Timestamp,
 };
-use universe::generator::{generate_star, star_info_at, StarType};
-use universe::settings::{distance_between_cells_ly, COORD_UNITS_PER_LY};
-use universe::material_stock::{merge_into_cargo, total_kt, try_subtract_materials};
-use universe::Material;
-use universe::{
-    ShipAtStar, ShipAttackMode, ShipInTransit, ShipLocation, ShipStats,
+use universe::generator::{StarType, generate_star, star_info_at};
+use universe::material_stock::{
+    get_amount, material_from_kind_kt, merge_into_cargo, normalize_material_vec, total_kt,
+    try_subtract_materials,
 };
+use universe::settings::{COORD_UNITS_PER_LY, distance_between_cells_ly};
+use universe::{Material, MaterialKind, ShipAttackMode, ShipStats, credits_for_materials_sale};
+
+use crate::battle::{Combatant, CombatantId, CombatantResult, run_battle};
 
 /// Credits granted when an empire first registers.
 const STARTING_CREDITS: u64 = 10_000;
@@ -103,6 +109,10 @@ pub struct Building {
     owner: Option<Identity>,
     /// **MilitaryGarrison** only: combat posture. Must be `None` for other kinds.
     attack_mode: Option<ShipAttackMode>,
+    // **MilitaryGarrison** only as well. Used in fight calculations.
+    // Garrisons also have attack, defense, and warp-speed so they can be treated as ships but this
+    // is determined via a lookup-table later when fights results are being calculated.
+    health: u32,
 }
 
 /// Shared star-system warehouse state: settled kt per material, lazy mining via [`last_settled_at`].
@@ -122,7 +132,11 @@ pub struct StarSystemStock {
 #[spacetimedb::table(
     accessor = ship,
     public,
-    index(accessor = ship_by_owner, btree(columns = [owner]))
+    index(accessor = ship_by_owner, btree(columns = [owner])),
+    index(
+        accessor = ship_by_docked_star,
+        btree(columns = [in_transit, star_x, star_y])
+    )
 )]
 pub struct Ship {
     #[primary_key]
@@ -134,9 +148,24 @@ pub struct Ship {
     /// Total load must stay within [`ShipStats::size_kt`] when reducers enforce logistics.
     cargo: Vec<Material>,
     attack_mode: ShipAttackMode,
-    location: ShipLocation,
-    /// Earliest time this ship may initiate a warp while docked (`ShipLocation::AtStar`). Ignored while `InTransit`.
+
+    /// `false` = docked at [`star_x`]/[`star_y`]. `true` = in warp; [`star_x`]/[`star_y`] duplicate **destination** for indexed queries.
+    in_transit: bool,
+    /// Docked: current cell. In transit: destination (same as [`transit_to_x`]/[`transit_to_y`]).
+    star_x: i32,
+    star_y: i32,
+    /// Meaningful when [`in_transit`]; otherwise zero.
+    transit_from_x: i32,
+    transit_from_y: i32,
+    transit_to_x: i32,
+    transit_to_y: i32,
+    transit_depart_at: Timestamp,
+    transit_arrive_at: Timestamp,
+
+    /// Earliest time this ship may initiate a warp while docked. Ignored while in transit.
     jump_ready_at: Timestamp,
+    // Max and default health = ship weight in kt.
+    health: u32,
 }
 
 /// One-shot timer to complete an in-flight warp at `arrive_at`.
@@ -183,13 +212,7 @@ pub fn register_empire(ctx: &ReducerContext, name: String) -> Result<(), String>
         return Err("Empire already registered for this identity".to_string());
     }
 
-    if ctx
-        .db
-        .empire()
-        .name()
-        .find(&trimmed.to_string())
-        .is_some()
-    {
+    if ctx.db.empire().name().find(&trimmed.to_string()).is_some() {
         return Err("That empire name is already taken".to_string());
     }
 
@@ -204,6 +227,11 @@ pub fn register_empire(ctx: &ReducerContext, name: String) -> Result<(), String>
 
 fn owner_has_any_ship(ctx: &ReducerContext, owner: Identity) -> bool {
     ctx.db.ship().iter().any(|s| s.owner == owner)
+}
+
+#[inline]
+fn ship_docked_at_star(s: &Ship, star_x: i32, star_y: i32) -> bool {
+    !s.in_transit && s.star_x == star_x && s.star_y == star_y
 }
 
 fn planet_has_enemy_garrison(
@@ -222,19 +250,129 @@ fn planet_has_enemy_garrison(
     })
 }
 
+/// Any enemy military garrison anywhere at this star cell.
+fn star_has_enemy_garrison(
+    ctx: &ReducerContext,
+    star_x: i32,
+    star_y: i32,
+    sender: Identity,
+) -> bool {
+    ctx.db.building().iter().any(|b| {
+        b.star_x == star_x
+            && b.star_y == star_y
+            && b.kind == BuildingKind::MilitaryGarrison
+            && b.owner.is_some()
+            && b.owner != Some(sender)
+    })
+}
+
+fn docked_ships_at_star(ctx: &ReducerContext, star_x: i32, star_y: i32) -> Vec<Ship> {
+    ctx.db
+        .ship()
+        .ship_by_docked_star()
+        .filter((false, star_x, star_y))
+        .collect::<Vec<_>>()
+}
+
+fn apply_battle_results(ctx: &ReducerContext, battle_results: Vec<CombatantResult>) {
+    for result in battle_results {
+        match result.id {
+            CombatantId::Ship(id) => {
+                if let Some(ship) = ctx.db.ship().id().find(&id) {
+                    if result.damage_taken >= ship.health {
+                        ctx.db.ship().id().delete(&id);
+                    } else {
+                        ctx.db.ship().id().update(Ship {
+                            health: ship.health - result.damage_taken,
+                            ..ship
+                        });
+                    }
+                }
+            }
+            CombatantId::Garrison(id) => {
+                if let Some(building) = ctx.db.building().id().find(&id) {
+                    if result.damage_taken >= building.health {
+                        ctx.db.building().id().delete(&id);
+                    } else {
+                        ctx.db.building().id().update(Building {
+                            health: building.health - result.damage_taken,
+                            ..building
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Aggressor vs everyone else at the star: all docked ships and all garrisons participate.
+/// No-op if there is nothing to fight. Errors if the aggressor has no ships or garrisons there while enemies exist.
+fn resolve_battle_at_star(
+    ctx: &ReducerContext,
+    aggressor: Identity,
+    star_x: i32,
+    star_y: i32,
+) -> Result<(), String> {
+    let ships = docked_ships_at_star(ctx, star_x, star_y);
+    let garrisons: Vec<Building> = ctx
+        .db
+        .building()
+        .iter()
+        .filter(|b| {
+            b.star_x == star_x
+                && b.star_y == star_y
+                && b.kind == BuildingKind::MilitaryGarrison
+        })
+        .collect();
+
+    let my_ships: Vec<&Ship> = ships.iter().filter(|s| s.owner == aggressor).collect();
+    let enemy_ships: Vec<&Ship> = ships.iter().filter(|s| s.owner != aggressor).collect();
+    let my_garrisons: Vec<&Building> = garrisons
+        .iter()
+        .filter(|b| b.owner == Some(aggressor))
+        .collect();
+    let enemy_garrisons: Vec<&Building> = garrisons
+        .iter()
+        .filter(|b| b.owner != Some(aggressor))
+        .collect();
+
+    let enemy_present = !enemy_ships.is_empty() || !enemy_garrisons.is_empty();
+    if !enemy_present {
+        return Ok(());
+    }
+
+    if my_ships.is_empty() && my_garrisons.is_empty() {
+        return Err("No forces on your side at this star".to_string());
+    }
+
+    let attackers: Vec<&dyn Combatant> = my_ships
+        .iter()
+        .copied()
+        .map(|s| s as &dyn Combatant)
+        .chain(my_garrisons.iter().map(|g| *g as &dyn Combatant))
+        .collect();
+    let defenders: Vec<&dyn Combatant> = enemy_ships
+        .iter()
+        .copied()
+        .map(|s| s as &dyn Combatant)
+        .chain(enemy_garrisons.iter().map(|g| *g as &dyn Combatant))
+        .collect();
+
+    let battle_results = run_battle(&attackers, &defenders);
+    apply_battle_results(ctx, battle_results);
+    Ok(())
+}
+
 fn player_has_stationed_ship_at_star(
     ctx: &ReducerContext,
     star_x: i32,
     star_y: i32,
     sender: Identity,
 ) -> bool {
-    ctx.db.ship().iter().any(|s| {
-        s.owner == sender
-            && matches!(
-                &s.location,
-                ShipLocation::AtStar(loc) if loc.star_x == star_x && loc.star_y == star_y
-            )
-    })
+    ctx.db
+        .ship()
+        .iter()
+        .any(|s| s.owner == sender && ship_docked_at_star(&s, star_x, star_y))
 }
 
 fn max_ship_size_kt_at_star(
@@ -246,13 +384,7 @@ fn max_ship_size_kt_at_star(
     ctx.db
         .ship()
         .iter()
-        .filter(|s| {
-            s.owner == sender
-                && matches!(
-                    &s.location,
-                    ShipLocation::AtStar(loc) if loc.star_x == star_x && loc.star_y == star_y
-                )
-        })
+        .filter(|s| s.owner == sender && ship_docked_at_star(s, star_x, star_y))
         .map(|s| s.stats.size_kt)
         .max()
         .unwrap_or(0)
@@ -301,15 +433,78 @@ fn deduct_credits(ctx: &ReducerContext, amount: u64) -> Result<(), String> {
     Ok(())
 }
 
+fn add_credits(ctx: &ReducerContext, delta: u64) -> Result<(), String> {
+    if delta == 0 {
+        return Ok(());
+    }
+    let emp = ctx
+        .db
+        .empire()
+        .identity()
+        .find(ctx.sender())
+        .ok_or_else(|| "Register an empire first".to_string())?;
+    ctx.db.empire().identity().update(Empire {
+        credits: emp.credits.saturating_add(delta),
+        ..emp
+    });
+    Ok(())
+}
+
+#[must_use]
+fn star_has_sales_depot(ctx: &ReducerContext, star_x: i32, star_y: i32) -> bool {
+    ctx.db
+        .building()
+        .iter()
+        .any(|b| b.star_x == star_x && b.star_y == star_y && b.kind == BuildingKind::SalesDepot)
+}
+
+/// Empty `requested`, or all-zero amounts, means sell everything in `available`.
+fn resolve_sale_amounts(
+    available: &[Material],
+    requested: &[Material],
+) -> Result<Vec<Material>, String> {
+    if requested.is_empty() || total_kt(requested) <= 1e-12 {
+        let mut v = available.to_vec();
+        normalize_material_vec(&mut v);
+        return Ok(v);
+    }
+    for m in requested {
+        if m.amount() < 0.0 {
+            return Err("Sale amounts must be non-negative".to_string());
+        }
+    }
+    let mut need: HashMap<MaterialKind, f64> = HashMap::new();
+    for m in requested {
+        let q = m.amount();
+        if q > 0.0 {
+            *need.entry(m.kind()).or_insert(0.0) += q;
+        }
+    }
+    let mut out = Vec::new();
+    for &k in MaterialKind::ALL {
+        let q = need.get(&k).copied().unwrap_or(0.0);
+        if q <= 1e-12 {
+            continue;
+        }
+        if get_amount(available, k) + 1e-9 < q {
+            return Err("Not enough resources for this sale".to_string());
+        }
+        out.push(material_from_kind_kt(k, q));
+    }
+    normalize_material_vec(&mut out);
+    Ok(out)
+}
+
 fn planet_has_any_building(
     ctx: &ReducerContext,
     star_x: i32,
     star_y: i32,
     planet_index: u8,
 ) -> bool {
-    ctx.db.building().iter().any(|b| {
-        b.star_x == star_x && b.star_y == star_y && b.planet_index == planet_index
-    })
+    ctx.db
+        .building()
+        .iter()
+        .any(|b| b.star_x == star_x && b.star_y == star_y && b.planet_index == planet_index)
 }
 
 /// Uniform random point in a disk (area-uniform): radius `r_grid` in grid units (tenths of a ly).
@@ -400,6 +595,7 @@ pub fn spawn_starter_ship(ctx: &ReducerContext) -> Result<(), String> {
     };
 
     let stats = ShipStats::default();
+    let health = stats.size_kt;
     // Starter ship may warp immediately (no initial battery charge wait at spawn).
     let jump_ready_at = ctx.timestamp;
 
@@ -409,8 +605,17 @@ pub fn spawn_starter_ship(ctx: &ReducerContext) -> Result<(), String> {
         stats,
         cargo: vec![],
         attack_mode: ShipAttackMode::Defend,
-        location: ShipLocation::AtStar(ShipAtStar { star_x, star_y }),
+        in_transit: false,
+        star_x,
+        star_y,
+        transit_from_x: 0,
+        transit_from_y: 0,
+        transit_to_x: 0,
+        transit_to_y: 0,
+        transit_depart_at: Timestamp::UNIX_EPOCH,
+        transit_arrive_at: Timestamp::UNIX_EPOCH,
         jump_ready_at,
+        health,
     });
 
     Ok(())
@@ -433,9 +638,12 @@ pub fn order_warp(
         return Err("Not your ship".to_string());
     }
 
-    let ShipLocation::AtStar(from) = &ship.location else {
+    if ship.in_transit {
         return Err("Ship is not docked at a star".to_string());
-    };
+    }
+
+    let from_x = ship.star_x;
+    let from_y = ship.star_y;
 
     if ctx.timestamp < ship.jump_ready_at {
         return Err("Jump battery still charging".to_string());
@@ -445,11 +653,11 @@ pub fn order_warp(
         return Err("No star at destination".to_string());
     }
 
-    if from.star_x == dest_star_x && from.star_y == dest_star_y {
+    if from_x == dest_star_x && from_y == dest_star_y {
         return Err("Already at destination".to_string());
     }
 
-    let dist_ly = distance_between_cells_ly(from.star_x, from.star_y, dest_star_x, dest_star_y);
+    let dist_ly = distance_between_cells_ly(from_x, from_y, dest_star_x, dest_star_y);
     if dist_ly > ship.stats.battery_ly as f64 {
         return Err(format!(
             "Destination is {:.2} ly away; battery range is {} ly",
@@ -471,14 +679,15 @@ pub fn order_warp(
     });
 
     ctx.db.ship().id().update(Ship {
-        location: ShipLocation::InTransit(ShipInTransit {
-            from_star_x: from.star_x,
-            from_star_y: from.star_y,
-            to_star_x: dest_star_x,
-            to_star_y: dest_star_y,
-            depart_at: depart,
-            arrive_at: arrive,
-        }),
+        in_transit: true,
+        star_x: dest_star_x,
+        star_y: dest_star_y,
+        transit_from_x: from_x,
+        transit_from_y: from_y,
+        transit_to_x: dest_star_x,
+        transit_to_y: dest_star_y,
+        transit_depart_at: depart,
+        transit_arrive_at: arrive,
         jump_ready_at: Timestamp::UNIX_EPOCH,
         ..ship
     });
@@ -492,11 +701,11 @@ pub fn complete_warp(ctx: &ReducerContext, job: WarpJob) -> Result<(), String> {
         return Ok(());
     };
 
-    let ShipLocation::InTransit(t) = &ship.location else {
+    if !ship.in_transit {
         return Ok(());
-    };
+    }
 
-    if t.to_star_x != job.to_star_x || t.to_star_y != job.to_star_y {
+    if ship.transit_to_x != job.to_star_x || ship.transit_to_y != job.to_star_y {
         return Ok(());
     }
 
@@ -506,14 +715,88 @@ pub fn complete_warp(ctx: &ReducerContext, job: WarpJob) -> Result<(), String> {
         return Ok(());
     };
 
+    let strike_first_arrival = ship.attack_mode == ShipAttackMode::StrikeFirst;
+    let aggressor = ship.owner;
+
     ctx.db.ship().id().update(Ship {
-        location: ShipLocation::AtStar(ShipAtStar {
-            star_x: job.to_star_x,
-            star_y: job.to_star_y,
-        }),
+        in_transit: false,
+        star_x: job.to_star_x,
+        star_y: job.to_star_y,
+        transit_from_x: 0,
+        transit_from_y: 0,
+        transit_to_x: 0,
+        transit_to_y: 0,
+        transit_depart_at: Timestamp::UNIX_EPOCH,
+        transit_arrive_at: Timestamp::UNIX_EPOCH,
         jump_ready_at,
         ..ship
     });
+
+    if strike_first_arrival {
+        let others = docked_ships_at_star(ctx, job.to_star_x, job.to_star_y)
+            .into_iter()
+            .any(|s| s.owner != aggressor);
+        if others {
+            resolve_battle_at_star(ctx, aggressor, job.to_star_x, job.to_star_y)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn execute_battle(ctx: &ReducerContext, star_x: u32, star_y: u32) -> Result<(), String> {
+    if ctx.db.empire().identity().find(ctx.sender()).is_none() {
+        return Err("Register an empire first".to_string());
+    }
+
+    let sx = star_x as i32;
+    let sy = star_y as i32;
+    resolve_battle_at_star(ctx, ctx.sender(), sx, sy)
+}
+
+/// Set a ship’s attack posture while docked. Switching to **Strike first** when other forces are at the star resolves combat only (call again afterward for other actions).
+#[spacetimedb::reducer]
+pub fn set_ship_attack_mode(
+    ctx: &ReducerContext,
+    ship_id: u64,
+    attack_mode: ShipAttackMode,
+) -> Result<(), String> {
+    if ctx.db.empire().identity().find(ctx.sender()).is_none() {
+        return Err("Register an empire first".to_string());
+    }
+
+    let ship = ctx
+        .db
+        .ship()
+        .id()
+        .find(&ship_id)
+        .ok_or_else(|| "Ship not found".to_string())?;
+    if ship.owner != ctx.sender() {
+        return Err("Not your ship".to_string());
+    }
+    if ship.in_transit {
+        return Err("Ship is not docked at a star".to_string());
+    }
+
+    let sx = ship.star_x;
+    let sy = ship.star_y;
+    let aggressor = ship.owner;
+    let want_strike = attack_mode == ShipAttackMode::StrikeFirst;
+
+    ctx.db.ship().id().update(Ship {
+        attack_mode,
+        ..ship
+    });
+
+    if want_strike {
+        let others = docked_ships_at_star(ctx, sx, sy)
+            .into_iter()
+            .any(|s| s.owner != aggressor);
+        if others {
+            resolve_battle_at_star(ctx, aggressor, sx, sy)?;
+        }
+    }
 
     Ok(())
 }
@@ -550,11 +833,16 @@ pub fn collect_star_resources(
         return Err("Not your ship".to_string());
     }
 
-    let ShipLocation::AtStar(loc) = &ship.location else {
+    if ship.in_transit {
         return Err("Ship is not docked at a star".to_string());
-    };
-    let star_x = loc.star_x;
-    let star_y = loc.star_y;
+    }
+    let star_x = ship.star_x;
+    let star_y = ship.star_y;
+
+    if star_has_enemy_garrison(ctx, star_x, star_y, ctx.sender()) {
+        resolve_battle_at_star(ctx, ctx.sender(), star_x, star_y)?;
+        return Ok(());
+    }
 
     settle_star_resources(ctx, star_x, star_y)?;
 
@@ -570,23 +858,130 @@ pub fn collect_star_resources(
     if new_cargo_total > ship.stats.size_kt as f64 + 1e-6 {
         return Err(format!(
             "Cargo capacity exceeded (would be {:.2} / {} kt)",
-            new_cargo_total,
-            ship.stats.size_kt
+            new_cargo_total, ship.stats.size_kt
         ));
     }
 
     let mut settled = row.settled.clone();
     try_subtract_materials(&mut settled, &pickup)?;
 
-    ctx.db.star_system_stock().star_location_id().update(StarSystemStock {
-        settled,
-        ..row
-    });
+    ctx.db
+        .star_system_stock()
+        .star_location_id()
+        .update(StarSystemStock { settled, ..row });
 
     let mut cargo = ship.cargo.clone();
     merge_into_cargo(&mut cargo, &pickup);
 
     ctx.db.ship().id().update(Ship { cargo, ..ship });
+
+    Ok(())
+}
+
+/// Sell ship cargo to the government sink at a star that has a Sales Depot. Empty `amounts` sells all.
+#[spacetimedb::reducer]
+pub fn sell_ship_cargo(
+    ctx: &ReducerContext,
+    ship_id: u64,
+    amounts: Vec<Material>,
+) -> Result<(), String> {
+    if ctx.db.empire().identity().find(ctx.sender()).is_none() {
+        return Err("Register an empire first".to_string());
+    }
+
+    let ship = ctx
+        .db
+        .ship()
+        .id()
+        .find(&ship_id)
+        .ok_or_else(|| "Ship not found".to_string())?;
+    if ship.owner != ctx.sender() {
+        return Err("Not your ship".to_string());
+    }
+
+    if ship.in_transit {
+        return Err("Ship is not docked at a star".to_string());
+    }
+    let star_x = ship.star_x;
+    let star_y = ship.star_y;
+
+    if !star_has_sales_depot(ctx, star_x, star_y) {
+        return Err("No Sales Depot at this star".to_string());
+    }
+
+    let to_sell = resolve_sale_amounts(&ship.cargo, &amounts)?;
+    if total_kt(&to_sell) <= 1e-12 {
+        return Ok(());
+    }
+
+    let credits = credits_for_materials_sale(&to_sell);
+    let mut cargo = ship.cargo.clone();
+    try_subtract_materials(&mut cargo, &to_sell)?;
+    add_credits(ctx, credits)?;
+    ctx.db.ship().id().update(Ship { cargo, ..ship });
+
+    Ok(())
+}
+
+/// Sell from the star’s shared warehouse at baseline prices. Empty `amounts` sells all settled stock. Runs settlement first.
+#[spacetimedb::reducer]
+pub fn sell_star_warehouse(
+    ctx: &ReducerContext,
+    ship_id: u64,
+    amounts: Vec<Material>,
+) -> Result<(), String> {
+    if ctx.db.empire().identity().find(ctx.sender()).is_none() {
+        return Err("Register an empire first".to_string());
+    }
+
+    let ship = ctx
+        .db
+        .ship()
+        .id()
+        .find(&ship_id)
+        .ok_or_else(|| "Ship not found".to_string())?;
+    if ship.owner != ctx.sender() {
+        return Err("Not your ship".to_string());
+    }
+
+    if ship.in_transit {
+        return Err("Ship is not docked at a star".to_string());
+    }
+    let star_x = ship.star_x;
+    let star_y = ship.star_y;
+
+    if !star_has_sales_depot(ctx, star_x, star_y) {
+        return Err("No Sales Depot at this star".to_string());
+    }
+
+    if star_has_enemy_garrison(ctx, star_x, star_y, ctx.sender()) {
+        resolve_battle_at_star(ctx, ctx.sender(), star_x, star_y)?;
+        return Ok(());
+    }
+
+    settle_star_resources(ctx, star_x, star_y)?;
+
+    let sid = star_location_id(star_x, star_y);
+    let row = ctx
+        .db
+        .star_system_stock()
+        .star_location_id()
+        .find(&sid)
+        .ok_or_else(|| "Star system stock missing".to_string())?;
+
+    let to_sell = resolve_sale_amounts(&row.settled, &amounts)?;
+    if total_kt(&to_sell) <= 1e-12 {
+        return Ok(());
+    }
+
+    let credits = credits_for_materials_sale(&to_sell);
+    let mut settled = row.settled.clone();
+    try_subtract_materials(&mut settled, &to_sell)?;
+    add_credits(ctx, credits)?;
+    ctx.db
+        .star_system_stock()
+        .star_location_id()
+        .update(StarSystemStock { settled, ..row });
 
     Ok(())
 }
@@ -633,11 +1028,11 @@ pub fn place_building(
 
     let max_kt = max_ship_size_kt_at_star(ctx, star_x, star_y, ctx.sender());
 
-    let (cost, owner, eff_level, mining_mat, attack_mode) = match kind {
+    let (cost, owner, eff_level, mining_mat, attack_mode, health) = match kind {
         BuildingKind::SalesDepot => {
             let n = count_sales_depots_owned(ctx, ctx.sender());
             let c = sales_depot_next_cost(n);
-            (c, Some(ctx.sender()), 1_u32, None, None)
+            (c, Some(ctx.sender()), 1_u32, None, None, 0)
         }
         BuildingKind::MiningDepot => {
             let lv = level;
@@ -659,7 +1054,7 @@ pub fn place_building(
                 .ok_or_else(|| "Invalid resource index for this planet".to_string())?;
             let c = credits_for_leveled_place(kind, lv)
                 .ok_or_else(|| "Invalid level for this building kind".to_string())?;
-            (c, None, lv, Some(mat), None)
+            (c, None, lv, Some(mat), None, 0)
         }
         BuildingKind::Warehouse | BuildingKind::ShipDepot => {
             let lv = level;
@@ -674,7 +1069,7 @@ pub fn place_building(
             }
             let c = credits_for_leveled_place(kind, lv)
                 .ok_or_else(|| "Invalid level for this building kind".to_string())?;
-            (c, None, lv, None, None)
+            (c, None, lv, None, None, 0)
         }
         BuildingKind::MilitaryGarrison => {
             let lv = level;
@@ -691,7 +1086,7 @@ pub fn place_building(
                 .ok_or_else(|| "Invalid level for this building kind".to_string())?;
             let am = garrison_attack_mode
                 .ok_or_else(|| "Military garrison requires attack mode".to_string())?;
-            (c, Some(ctx.sender()), lv, None, Some(am))
+            (c, Some(ctx.sender()), lv, None, Some(am), 1)
         }
     };
 
@@ -711,13 +1106,18 @@ pub fn place_building(
         mining_material: mining_mat,
         owner,
         attack_mode,
+        health,
     });
 
     Ok(())
 }
 
 #[spacetimedb::reducer]
-pub fn upgrade_building(ctx: &ReducerContext, building_id: u64, new_level: u32) -> Result<(), String> {
+pub fn upgrade_building(
+    ctx: &ReducerContext,
+    building_id: u64,
+    new_level: u32,
+) -> Result<(), String> {
     if ctx.db.empire().identity().find(ctx.sender()).is_none() {
         return Err("Register an empire first".to_string());
     }

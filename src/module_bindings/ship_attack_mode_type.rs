@@ -6,15 +6,13 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
-pub struct ShipInTransit {
-    pub from_star_x: i32,
-    pub from_star_y: i32,
-    pub to_star_x: i32,
-    pub to_star_y: i32,
-    pub depart_at: __sdk::Timestamp,
-    pub arrive_at: __sdk::Timestamp,
+#[derive(Copy, Eq, Hash)]
+pub enum ShipAttackMode {
+    Defend,
+
+    StrikeFirst,
 }
 
-impl __sdk::InModule for ShipInTransit {
+impl __sdk::InModule for ShipAttackMode {
     type Module = super::RemoteModule;
 }

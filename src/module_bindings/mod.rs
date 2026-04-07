@@ -19,6 +19,7 @@ pub mod place_building_reducer;
 pub mod register_empire_reducer;
 pub mod sell_ship_cargo_reducer;
 pub mod sell_star_warehouse_reducer;
+pub mod set_ship_attack_mode_reducer;
 pub mod ship_attack_mode_type;
 pub mod ship_stats_type;
 pub mod ship_table;
@@ -42,6 +43,7 @@ pub use place_building_reducer::place_building;
 pub use register_empire_reducer::register_empire;
 pub use sell_ship_cargo_reducer::sell_ship_cargo;
 pub use sell_star_warehouse_reducer::sell_star_warehouse;
+pub use set_ship_attack_mode_reducer::set_ship_attack_mode;
 pub use ship_attack_mode_type::ShipAttackMode;
 pub use ship_stats_type::ShipStats;
 pub use ship_table::*;
@@ -94,6 +96,10 @@ pub enum Reducer {
         ship_id: u64,
         amounts: Vec<Material>,
     },
+    SetShipAttackMode {
+        ship_id: u64,
+        attack_mode: ShipAttackMode,
+    },
     SpawnStarterShip,
     UpgradeBuilding {
         building_id: u64,
@@ -115,6 +121,7 @@ impl __sdk::Reducer for Reducer {
             Reducer::RegisterEmpire { .. } => "register_empire",
             Reducer::SellShipCargo { .. } => "sell_ship_cargo",
             Reducer::SellStarWarehouse { .. } => "sell_star_warehouse",
+            Reducer::SetShipAttackMode { .. } => "set_ship_attack_mode",
             Reducer::SpawnStarterShip => "spawn_starter_ship",
             Reducer::UpgradeBuilding { .. } => "upgrade_building",
             _ => unreachable!(),
@@ -180,6 +187,13 @@ impl __sdk::Reducer for Reducer {
                     amounts: amounts.clone(),
                 })
             }
+            Reducer::SetShipAttackMode {
+                ship_id,
+                attack_mode,
+            } => __sats::bsatn::to_vec(&set_ship_attack_mode_reducer::SetShipAttackModeArgs {
+                ship_id: ship_id.clone(),
+                attack_mode: attack_mode.clone(),
+            }),
             Reducer::SpawnStarterShip => {
                 __sats::bsatn::to_vec(&spawn_starter_ship_reducer::SpawnStarterShipArgs {})
             }

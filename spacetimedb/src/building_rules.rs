@@ -1,15 +1,8 @@
 //! Hardcoded building economy and ship-size gates (no closed-form level formula).
+use crate::buildling_settings::*;
 
 use crate::BuildingKind;
 use universe::Material;
-
-/// Maximum building level supported by [`MIN_SHIP_KT_FOR_LEVEL`] and credit tables.
-pub const MAX_BUILDING_LEVEL: usize = 12;
-
-/// Minimum ship `size_kt` by **level** (level 1 → `MIN_SHIP_KT_FOR_LEVEL[0]`, minimum 1 kt).
-pub const MIN_SHIP_KT_FOR_LEVEL: [u32; MAX_BUILDING_LEVEL] = [
-    1, 5, 10, 20, 50, 100, 150, 200, 250, 300, 400, 500,
-];
 
 /// `level` must be in `1..=MAX_BUILDING_LEVEL` (validated by reducers before calling).
 #[inline]
@@ -73,12 +66,14 @@ pub fn mining_depot_rate_kt_s(
     f64::from(level) * planet_richness * material.multiplier() * 0.01 * deg
 }
 
-/// Garrison military power (abstract units).
+/// Garrison stats (attack, defense, speed, health)
 #[allow(dead_code)] // used by explorer mirror; server combat reducers TBD
 #[must_use]
-pub fn garrison_power_units(level: u32, degradation_percent: f32) -> f64 {
-    let deg = (1.0 - (degradation_percent.clamp(0.0, 100.0) as f64 / 100.0)).max(0.0);
-    f64::from(level) * 100.0 * deg
+pub fn garrison_stats(level: usize) -> GarrisonStats {
+    return match level {
+        0..11 => GARRISON_STATS_FOR_LEVEL[level],
+        _ => panic!("Code tried to get garrison with level higher than 12 for some reason"),
+    };
 }
 
 /// Concurrent ship build slots for one ship depot.

@@ -52,6 +52,34 @@ pub enum ShipLocation {
     InTransit(ShipInTransit),
 }
 
+/// Builds the legacy [`ShipLocation`] view from flat ship row fields (table stores scalars, not this enum).
+#[cfg(feature = "spacetimedb")]
+#[must_use]
+pub fn ship_location_from_flat(
+    in_transit: bool,
+    star_x: i32,
+    star_y: i32,
+    transit_from_x: i32,
+    transit_from_y: i32,
+    transit_to_x: i32,
+    transit_to_y: i32,
+    transit_depart_at: spacetimedb::Timestamp,
+    transit_arrive_at: spacetimedb::Timestamp,
+) -> ShipLocation {
+    if in_transit {
+        ShipLocation::InTransit(ShipInTransit {
+            from_star_x: transit_from_x,
+            from_star_y: transit_from_y,
+            to_star_x: transit_to_x,
+            to_star_y: transit_to_y,
+            depart_at: transit_depart_at,
+            arrive_at: transit_arrive_at,
+        })
+    } else {
+        ShipLocation::AtStar(ShipAtStar { star_x, star_y })
+    }
+}
+
 #[cfg_attr(feature = "spacetimedb", derive(spacetimedb::SpacetimeType))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShipStats {

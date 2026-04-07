@@ -4,7 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Battle simulation (`run_battle`):** units with no damage row were treated as dead, so the battle loop never ran. Missing `CombatantResult` now means **undamaged** (still alive). Unit tests cover damage resolution, defender speed selection, stacked team attack, stalemate, and garrison stats.
+
 ### Added
+
+- **SpacetimeDB — combat at stars (two-team battle):** **`resolve_battle_at_star`** runs **`run_battle`** for the aggressor’s docked ships + their garrisons vs everyone else at **`(star_x, star_y)`**, then applies damage. **`complete_warp`** triggers a battle when the arriving ship is **`StrikeFirst`** and other players’ ships are docked there. **`set_ship_attack_mode(ship_id, attack_mode)`** updates mode and triggers the same battle when switching to **`StrikeFirst`** with others present. **`collect_star_resources`** and **`sell_star_warehouse`** call **`resolve_battle_at_star`** first when an **enemy military garrison** is at the star, then **return without** settling/collecting or selling in that same reducer call so the client can read combat results and retry. **`execute_battle`** still resolves combat on demand. Regenerate **`vast-bindings`** after pulling so clients see **`set_ship_attack_mode`**.
+
+- **SpacetimeDB — Sales Depot (government sink):** baseline credits per kt in [`universe::resources`](universe/src/resources.rs) (**Iron 10**, **Helium 15**). Reducers **`sell_ship_cargo(ship_id, amounts)`** and **`sell_star_warehouse(ship_id, amounts)`** require the caller’s ship **`AtStar`** and **any** **`SalesDepot`** at that **`(star_x, star_y)`**; **`amounts`** empty means sell **everything** from ship cargo or from settled warehouse stock (after **`settle_star_resources`** for warehouse). Credits are added to **`Empire.credits`** (`u64` saturating). **`universe::credits_for_materials_sale`** matches server payout (per-kind `floor(kt × price)`).
+- **Galaxy Explorer:** when a selected star has a **Sales Depot**, **Sales (Sales Depot)** shows baseline prices, sliders + **Sell from ship** / **Sell all ship cargo**, and warehouse sliders + **Sell warehouse** / **Sell all warehouse stock** (uses the same ship selection as collect).
 
 - **SpacetimeDB — star-system economy (lazy mining):** public table **`star_system_stock`** (`star_location_id`, `last_settled_at`, `capacity_kt`, **`settled: Vec<Material>`**). Mining accrues only on **settlement** (no scheduled mining ticks): `t_eff = min(Δt, remaining_kt / total_kt_s)` with proportional clamp to capacity; miner rate per depot = `level × planet_richness × resource_richness × 0.01 × (1 − degradation)`; warehouse capacity = **Σ (warehouse level × 1 kt)** per star. Reducer **`collect_star_resources(ship_id, pickup)`** (ship must be **`AtStar`**) settles then loads requested materials onto **ship cargo** (enforces cargo capacity). **`place_building`** / **`upgrade_building`** call settlement before mutating buildings. Helpers in [`spacetimedb/src/star_economy.rs`](spacetimedb/src/star_economy.rs), [`universe::material_stock`](universe/src/material_stock.rs), and [`spacetimedb/src/building_rules.rs`](spacetimedb/src/building_rules.rs).
 - **Galaxy Explorer:** subscribes to **`star_system_stock`**; **Star economy** panel shows capacity, per-material mining rates, military power, ship build slots, settled/available kt; **Collect from warehouse** builds a **`Vec<Material>`** and calls **`collect_star_resources`**.
@@ -23,6 +32,8 @@ All notable changes to this project will be documented in this file.
 - **Galaxy Explorer:** universe map draws **owned ships** — cyan ring + dot at **`AtStar`** positions; **`InTransit`** shows a **dim line** plus a **bubble** along the route; HUD lists **ship count** and up to five ships with grid coordinates (ly).
 
 ### Changed
+
+- **Breaking — SpacetimeDB `Ship` table:** removed the **`location`** column (`ShipLocation` sum type). Rows now use **`in_transit`**, **`star_x`** / **`star_y`** (current cell when docked; **destination** while in transit, matching **`transit_to_*`**), **`transit_from_x/y`**, **`transit_to_x/y`**, **`transit_depart_at`**, **`transit_arrive_at`**, and existing **`jump_ready_at`** / **`health`**. Btree index **`ship_by_docked_star`** on **`[in_transit, star_x, star_y]`** supports looking up ships by star cell (docked vs inbound). **[`universe::ship_location_from_flat`](universe/src/ships.rs)** maps flat columns back to **`ShipLocation`** for callers that still want the enum. Republish with **`--clear-database`** if you have an existing module DB. Regenerate **`vast-bindings`** with **`spacetime generate`**.
 
 - **[`universe::Material`](universe/src/resources.rs):** **`amount()`** returns the inner `f64`; **`multiplier()`** delegates to it. **[`material_stock`](universe/src/material_stock.rs)** uses **`amount()`** where only the payload matters. **Galaxy Explorer** [`building_economy`](explorer/src/building_economy.rs) uses **`binding_to_universe`** / **`universe_to_binding`** and **`Material::kind()`** for mining rates and pickup so new ores extend those two conversions (plus **`MaterialKind::ALL`**) instead of scattered Iron/Helium matches.
 
@@ -63,7 +74,7 @@ All notable changes to this project will be documented in this file.
 
 - Root client default **`SPACETIMEDB_DB_NAME`** is now **`vast`** (was `my-db`) to match typical local publish names; set the env var if you use another database name.
 
-- SpacetimeDB **`BuildingKind`**: new variant **`SalesDepot`** (government sink / instant exchange vendor; no new `Building` columns). Enum changes may require republishing with `--clear-database` if not auto-migrated. Sell reducer and pricing are not implemented yet.
+- SpacetimeDB **`BuildingKind`**: new variant **`SalesDepot`** (government sink / instant exchange vendor; no new `Building` columns). Enum changes may require republishing with `--clear-database` if not auto-migrated.
 
 - SpacetimeDB `ship` schema: new **`cargo`** column (`Vec<Material>`). Republish existing databases with `--clear-database` or run a migration if you keep data (no migration reducer added here).
 

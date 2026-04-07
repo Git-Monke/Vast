@@ -10,13 +10,18 @@ use spacetimedb_sdk::{DbContext, Identity, Table};
 use spacetimedb_sdk::Timestamp;
 use vast_bindings::{
     buildingQueryTableAccess, collect_star_resources, empireQueryTableAccess, order_warp,
-    place_building, register_empire, shipQueryTableAccess, spawn_starter_ship, upgrade_building,
-    star_system_stockQueryTableAccess,
+    place_building, register_empire, sell_ship_cargo, sell_star_warehouse, shipQueryTableAccess,
+    spawn_starter_ship, upgrade_building, star_system_stockQueryTableAccess,
     Building, BuildingKind, BuildingTableAccess, DbConnection, Empire, EmpireTableAccess, Material,
-    Ship, ShipAttackMode, ShipLocation, ShipTableAccess, StarSystemStock, StarSystemStockTableAccess,
+    Ship, ShipAttackMode, ShipTableAccess, StarSystemStock, StarSystemStockTableAccess,
 };
 use universe::generator::{generate_star, star_info_at, PlanetType, StarSystem, StarType};
-use universe::MaterialKind;
+use universe::material_stock::get_amount;
+use universe::credits_for_materials_sale;
+use universe::{
+    Material as UniverseMaterial, MaterialKind, BASELINE_CREDITS_PER_KT_HELIUM,
+    BASELINE_CREDITS_PER_KT_IRON,
+};
 use universe::parse_star_id;
 use universe::star_location_id;
 use universe::settings::{grid_to_ly, COORD_UNITS_PER_LY};
@@ -35,12 +40,8 @@ fn max_stationed_kt(ships: &[Ship], owner: Identity, sx: i32, sy: i32) -> u32 {
     ships
         .iter()
         .filter(|s| s.owner == owner)
-        .filter_map(|s| match &s.location {
-            ShipLocation::AtStar(loc) if loc.star_x == sx && loc.star_y == sy => {
-                Some(s.stats.size_kt)
-            }
-            _ => None,
-        })
+        .filter(|s| !s.in_transit && s.star_x == sx && s.star_y == sy)
+        .map(|s| s.stats.size_kt)
         .max()
         .unwrap_or(0)
 }
@@ -138,12 +139,11 @@ fn format_large_number(num: u64) -> String {
 
 /// True if the ship is tied to this star (in this system, or in transit from/to here).
 fn my_ship_at_star_coords(ship: &Ship, star_x: i32, star_y: i32) -> bool {
-    match &ship.location {
-        ShipLocation::AtStar(loc) => loc.star_x == star_x && loc.star_y == star_y,
-        ShipLocation::InTransit(t) => {
-            (t.from_star_x == star_x && t.from_star_y == star_y)
-                || (t.to_star_x == star_x && t.to_star_y == star_y)
-        }
+    if !ship.in_transit {
+        ship.star_x == star_x && ship.star_y == star_y
+    } else {
+        (ship.transit_from_x == star_x && ship.transit_from_y == star_y)
+            || (ship.transit_to_x == star_x && ship.transit_to_y == star_y)
     }
 }
 
@@ -155,19 +155,17 @@ fn format_material_line(m: &Material) -> String {
 }
 
 fn jump_ready_line(ship: &Ship) -> Option<String> {
-    match &ship.location {
-        ShipLocation::AtStar(_) => {
-            let now = Timestamp::now();
-            let n = now.to_micros_since_unix_epoch();
-            let r = ship.jump_ready_at.to_micros_since_unix_epoch();
-            if n >= r {
-                Some("Battery: ready to warp".to_string())
-            } else {
-                let sec = ((r - n) / 1_000_000).max(1);
-                Some(format!("Battery: charging (~{sec}s to jump)"))
-            }
-        }
-        _ => None,
+    if ship.in_transit {
+        return None;
+    }
+    let now = Timestamp::now();
+    let n = now.to_micros_since_unix_epoch();
+    let r = ship.jump_ready_at.to_micros_since_unix_epoch();
+    if n >= r {
+        Some("Battery: ready to warp".to_string())
+    } else {
+        let sec = ((r - n) / 1_000_000).max(1);
+        Some(format!("Battery: charging (~{sec}s to jump)"))
     }
 }
 
@@ -267,6 +265,10 @@ struct ExplorerApp {
     build_garrison_mode: ShipAttackMode,
     /// Per [`MaterialKind::ALL`] — kt to load when collecting ([`collect_star_resources`]).
     collect_pickup_kt: Vec<f64>,
+    /// Per [`MaterialKind::ALL`] — kt to sell from ship at a Sales Depot ([`sell_ship_cargo`]).
+    sell_ship_kt: Vec<f64>,
+    /// Per [`MaterialKind::ALL`] — kt to sell from star warehouse ([`sell_star_warehouse`]).
+    sell_warehouse_kt: Vec<f64>,
     /// Throttled DB scans for the selected-star side panel ([`Self::refresh_star_panel_cache_if_needed`]).
     star_panel_cache_star: Option<(i32, i32)>,
     star_panel_cache_time_secs: f64,
@@ -353,6 +355,8 @@ impl ExplorerApp {
                 }
                 v
             },
+            sell_ship_kt: vec![0.0_f64; MaterialKind::ALL.len()],
+            sell_warehouse_kt: vec![0.0_f64; MaterialKind::ALL.len()],
             star_panel_cache_star: None,
             star_panel_cache_time_secs: 0.0,
             star_panel_cached_buildings: Vec::new(),
@@ -441,9 +445,9 @@ impl ExplorerApp {
         }
         if !self.did_center_camera {
             if let Some(ship) = self.my_ships.first() {
-                if let ShipLocation::AtStar(loc) = &ship.location {
-                    self.camera_x = grid_to_ly(loc.star_x);
-                    self.camera_y = grid_to_ly(loc.star_y);
+                if !ship.in_transit {
+                    self.camera_x = grid_to_ly(ship.star_x);
+                    self.camera_y = grid_to_ly(ship.star_y);
                     self.did_center_camera = true;
                 }
             }
@@ -702,26 +706,23 @@ impl ExplorerApp {
                                             ShipAttackMode::StrikeFirst => "Strike first",
                                         };
                                         ui.label(format!("Attack mode: {mode_s}"));
-                                        match &ship.location {
-                                            ShipLocation::AtStar(_) => {
-                                                ui.label("Location: in star system");
-                                                if let Some(j) = jump_ready_line(ship) {
-                                                    ui.label(
-                                                        egui::RichText::new(j)
-                                                            .small()
-                                                            .color(Color32::from_rgb(180, 200, 140)),
-                                                    );
-                                                }
+                                        if !ship.in_transit {
+                                            ui.label("Location: in star system");
+                                            if let Some(j) = jump_ready_line(ship) {
+                                                ui.label(
+                                                    egui::RichText::new(j)
+                                                        .small()
+                                                        .color(Color32::from_rgb(180, 200, 140)),
+                                                );
                                             }
-                                            ShipLocation::InTransit(t) => {
-                                                ui.label(format!(
-                                                    "In transit: ({:.1},{:.1}) → ({:.1},{:.1}) ly",
-                                                    grid_to_ly(t.from_star_x),
-                                                    grid_to_ly(t.from_star_y),
-                                                    grid_to_ly(t.to_star_x),
-                                                    grid_to_ly(t.to_star_y),
-                                                ));
-                                            }
+                                        } else {
+                                            ui.label(format!(
+                                                "In transit: ({:.1},{:.1}) → ({:.1},{:.1}) ly",
+                                                grid_to_ly(ship.transit_from_x),
+                                                grid_to_ly(ship.transit_from_y),
+                                                grid_to_ly(ship.transit_to_x),
+                                                grid_to_ly(ship.transit_to_y),
+                                            ));
                                         }
                                         if !ship.cargo.is_empty() {
                                             ui.label("Cargo:");
@@ -741,19 +742,16 @@ impl ExplorerApp {
                                         ui.horizontal(|ui| {
                                             if ui.button("Center on map").clicked() {
                                                 self.selected_ship_id = Some(ship.id);
-                                                match &ship.location {
-                                                    ShipLocation::AtStar(loc) => {
-                                                        self.camera_x = grid_to_ly(loc.star_x);
-                                                        self.camera_y = grid_to_ly(loc.star_y);
-                                                    }
-                                                    ShipLocation::InTransit(t) => {
-                                                        self.camera_x = (grid_to_ly(t.from_star_x)
-                                                            + grid_to_ly(t.to_star_x))
-                                                            * 0.5;
-                                                        self.camera_y = (grid_to_ly(t.from_star_y)
-                                                            + grid_to_ly(t.to_star_y))
-                                                            * 0.5;
-                                                    }
+                                                if !ship.in_transit {
+                                                    self.camera_x = grid_to_ly(ship.star_x);
+                                                    self.camera_y = grid_to_ly(ship.star_y);
+                                                } else {
+                                                    self.camera_x = (grid_to_ly(ship.transit_from_x)
+                                                        + grid_to_ly(ship.transit_to_x))
+                                                        * 0.5;
+                                                    self.camera_y = (grid_to_ly(ship.transit_from_y)
+                                                        + grid_to_ly(ship.transit_to_y))
+                                                        * 0.5;
                                                 }
                                             }
                                         });
@@ -991,6 +989,280 @@ impl ExplorerApp {
                         }
                     }
 
+                    let has_sales_depot = buildings_at_star
+                        .iter()
+                        .any(|b| b.kind == BuildingKind::SalesDepot);
+                    if has_sales_depot && self.game_ready() {
+                        if let Some(identity) = me {
+                            ui.separator();
+                            ui.heading("Sales (Sales Depot)");
+                            ui.label(format!(
+                                "Government sink: {} cr/kt Iron, {} cr/kt Helium",
+                                BASELINE_CREDITS_PER_KT_IRON, BASELINE_CREDITS_PER_KT_HELIUM
+                            ));
+                            let ships_docked: Vec<&Ship> = self
+                                .my_ships
+                                .iter()
+                                .filter(|s| {
+                                    s.owner == identity
+                                        && !s.in_transit
+                                        && s.star_x == sys.x
+                                        && s.star_y == sys.y
+                                })
+                                .collect();
+                            if ships_docked.is_empty() {
+                                ui.label(
+                                    egui::RichText::new("Station a ship to sell cargo.")
+                                        .weak(),
+                                );
+                            } else {
+                                let ship_for_sale = self
+                                    .selected_ship_id
+                                    .filter(|sid| ships_docked.iter().any(|s| s.id == *sid))
+                                    .or_else(|| ships_docked.first().map(|s| s.id));
+                                if let Some(ship_id) = ship_for_sale {
+                                    if let Some(ship) =
+                                        ships_docked.iter().copied().find(|s| s.id == ship_id)
+                                    {
+                                        let cargo_u: Vec<UniverseMaterial> = ship
+                                            .cargo
+                                            .iter()
+                                            .map(building_economy::binding_to_universe)
+                                            .collect();
+                                        ui.label("Sell from ship cargo");
+                                        for (i, &kind) in MaterialKind::ALL.iter().enumerate() {
+                                            let max_k = get_amount(&cargo_u, kind);
+                                            let hi = max_k.max(1e-9);
+                                            let label = match kind {
+                                                MaterialKind::Iron => "Iron kt",
+                                                MaterialKind::Helium => "Helium kt",
+                                            };
+                                            if let Some(amt) = self.sell_ship_kt.get_mut(i) {
+                                                if *amt > max_k {
+                                                    *amt = max_k;
+                                                }
+                                                ui.add(
+                                                    egui::Slider::new(amt, 0.0..=hi).text(label),
+                                                );
+                                            }
+                                        }
+                                        let pickup_s = building_economy::pickup_vec_for_reducer(
+                                            &self.sell_ship_kt,
+                                        );
+                                        let partial_u: Vec<UniverseMaterial> = pickup_s
+                                            .iter()
+                                            .map(building_economy::binding_to_universe)
+                                            .collect();
+                                        let est_ship = credits_for_materials_sale(&partial_u);
+                                        let est_all_ship = credits_for_materials_sale(&cargo_u);
+                                        ui.label(format!(
+                                            "Estimated (sliders): {} cr | Sell all: {} cr",
+                                            format_large_number(est_ship),
+                                            format_large_number(est_all_ship)
+                                        ));
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .button("Sell ship cargo (from sliders)")
+                                                .clicked()
+                                            {
+                                                if let Some(conn) = &self.conn {
+                                                    let tx = self.toast_tx.clone();
+                                                    if let Err(e) = conn
+                                                        .reducers()
+                                                        .sell_ship_cargo_then(
+                                                            ship_id,
+                                                            pickup_s,
+                                                            move |_, res| {
+                                                                let msg = match res {
+                                                                    Ok(Ok(())) => {
+                                                                        "Sold (ship).".into()
+                                                                    }
+                                                                    Ok(Err(err)) => {
+                                                                        format!("Sell ship: {err}")
+                                                                    }
+                                                                    Err(err) => format!(
+                                                                        "Sell ship failed: {err:?}"
+                                                                    ),
+                                                                };
+                                                                let _ = tx.send(msg);
+                                                            },
+                                                        )
+                                                    {
+                                                        self.toast_message = Some(format!(
+                                                            "Could not send sell_ship_cargo: {e:?}"
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                            if ui.button("Sell all ship cargo").clicked() {
+                                                if let Some(conn) = &self.conn {
+                                                    let tx = self.toast_tx.clone();
+                                                    if let Err(e) = conn
+                                                        .reducers()
+                                                        .sell_ship_cargo_then(
+                                                            ship_id,
+                                                            vec![],
+                                                            move |_, res| {
+                                                                let msg = match res {
+                                                                    Ok(Ok(())) => {
+                                                                        "Sold all (ship).".into()
+                                                                    }
+                                                                    Ok(Err(err)) => {
+                                                                        format!("Sell ship: {err}")
+                                                                    }
+                                                                    Err(err) => format!(
+                                                                        "Sell ship failed: {err:?}"
+                                                                    ),
+                                                                };
+                                                                let _ = tx.send(msg);
+                                                            },
+                                                        )
+                                                    {
+                                                        self.toast_message = Some(format!(
+                                                            "Could not send sell_ship_cargo: {e:?}"
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                        });
+
+                                        ui.separator();
+                                        ui.label("Sell from star warehouse");
+                                        if let Some(st) = self.star_panel_cached_stock.as_ref() {
+                                            let now = Timestamp::now();
+                                            let rates = building_economy::mining_rates_kt_s(
+                                                sys,
+                                                &buildings_at_star,
+                                            );
+                                            let tot = building_economy::theoretical_materials(
+                                                now,
+                                                st.last_settled_at,
+                                                &st.settled,
+                                                st.capacity_kt,
+                                                &rates,
+                                            );
+                                            for (i, &kind) in MaterialKind::ALL.iter().enumerate()
+                                            {
+                                                let max_k = get_amount(&tot, kind);
+                                                let hi = max_k.max(1e-9);
+                                                let label = match kind {
+                                                    MaterialKind::Iron => "Iron kt",
+                                                    MaterialKind::Helium => "Helium kt",
+                                                };
+                                                if let Some(amt) =
+                                                    self.sell_warehouse_kt.get_mut(i)
+                                                {
+                                                    if *amt > max_k {
+                                                        *amt = max_k;
+                                                    }
+                                                    ui.add(
+                                                        egui::Slider::new(amt, 0.0..=hi)
+                                                            .text(label),
+                                                    );
+                                                }
+                                            }
+                                            let pickup_w = building_economy::pickup_vec_for_reducer(
+                                                &self.sell_warehouse_kt,
+                                            );
+                                            let partial_w: Vec<UniverseMaterial> = pickup_w
+                                                .iter()
+                                                .map(building_economy::binding_to_universe)
+                                                .collect();
+                                            let est_wh = credits_for_materials_sale(&partial_w);
+                                            let est_all_wh = credits_for_materials_sale(&tot);
+                                            ui.label(format!(
+                                                "Estimated (sliders): {} cr | Sell all: {} cr",
+                                                format_large_number(est_wh),
+                                                format_large_number(est_all_wh)
+                                            ));
+                                            ui.horizontal(|ui| {
+                                                if ui
+                                                    .button("Sell warehouse (from sliders)")
+                                                    .clicked()
+                                                {
+                                                    if let Some(conn) = &self.conn {
+                                                        let tx = self.toast_tx.clone();
+                                                        if let Err(e) = conn
+                                                            .reducers()
+                                                            .sell_star_warehouse_then(
+                                                                ship_id,
+                                                                pickup_w,
+                                                                move |_, res| {
+                                                                    let msg = match res {
+                                                                        Ok(Ok(())) => {
+                                                                            "Sold (warehouse)."
+                                                                                .into()
+                                                                        }
+                                                                        Ok(Err(err)) => {
+                                                                            format!(
+                                                                                "Sell warehouse: {err}"
+                                                                            )
+                                                                        }
+                                                                        Err(err) => format!(
+                                                                            "Sell warehouse failed: {err:?}"
+                                                                        ),
+                                                                    };
+                                                                    let _ = tx.send(msg);
+                                                                },
+                                                            )
+                                                        {
+                                                            self.toast_message = Some(format!(
+                                                                "Could not send sell_star_warehouse: {e:?}"
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                                if ui.button("Sell all warehouse stock").clicked()
+                                                {
+                                                    if let Some(conn) = &self.conn {
+                                                        let tx = self.toast_tx.clone();
+                                                        if let Err(e) = conn
+                                                            .reducers()
+                                                            .sell_star_warehouse_then(
+                                                                ship_id,
+                                                                vec![],
+                                                                move |_, res| {
+                                                                    let msg = match res {
+                                                                        Ok(Ok(())) => {
+                                                                            "Sold all (warehouse)."
+                                                                                .into()
+                                                                        }
+                                                                        Ok(Err(err)) => {
+                                                                            format!(
+                                                                                "Sell warehouse: {err}"
+                                                                            )
+                                                                        }
+                                                                        Err(err) => format!(
+                                                                            "Sell warehouse failed: {err:?}"
+                                                                        ),
+                                                                    };
+                                                                    let _ = tx.send(msg);
+                                                                },
+                                                            )
+                                                        {
+                                                            self.toast_message = Some(format!(
+                                                                "Could not send sell_star_warehouse: {e:?}"
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        } else {
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "No warehouse stock row — settlement has not run here.",
+                                                )
+                                                .weak(),
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    ui.label("Select a ship at this star in the list above.");
+                                }
+                            }
+                        }
+                    }
+
                     if self.game_ready() {
                         if let Some(identity) = me {
                             ui.separator();
@@ -1000,11 +1272,9 @@ impl ExplorerApp {
                                 .iter()
                                 .filter(|s| {
                                     s.owner == identity
-                                        && matches!(
-                                            &s.location,
-                                            ShipLocation::AtStar(loc)
-                                                if loc.star_x == sys.x && loc.star_y == sys.y
-                                        )
+                                        && !s.in_transit
+                                        && s.star_x == sys.x
+                                        && s.star_y == sys.y
                                 })
                                 .collect();
                             if ships_docked.is_empty() {
@@ -1408,40 +1678,37 @@ impl ExplorerApp {
                 let ship_accent = Color32::from_rgb(0, 220, 255);
                 let ship_line = Color32::from_rgba_unmultiplied(0, 200, 255, 120);
                 for ship in &self.my_ships {
-                    match &ship.location {
-                        ShipLocation::AtStar(loc) => {
-                            let sp = to_screen(loc.star_x, loc.star_y);
-                            painter.circle_stroke(
-                                sp,
-                                ship_marker_r,
-                                egui::Stroke::new(1.8, ship_accent),
-                            );
-                            painter.circle_filled(sp, ship_marker_r * 0.35, ship_accent);
-                        }
-                        ShipLocation::InTransit(t) => {
-                            let a = to_screen(t.from_star_x, t.from_star_y);
-                            let b = to_screen(t.to_star_x, t.to_star_y);
-                            painter.line_segment(
-                                [a, b],
-                                egui::Stroke::new(1.0, ship_line),
-                            );
-                            let now = Timestamp::now();
-                            let n = now.to_micros_since_unix_epoch();
-                            let d0 = t.depart_at.to_micros_since_unix_epoch();
-                            let d1 = t.arrive_at.to_micros_since_unix_epoch();
-                            let frac = if d1 <= d0 {
-                                1.0_f32
-                            } else {
-                                (((n - d0) as f64 / (d1 - d0) as f64) as f32).clamp(0.0, 1.0)
-                            };
-                            let p = a.lerp(b, frac);
-                            painter.circle_stroke(
-                                p,
-                                ship_marker_r,
-                                egui::Stroke::new(1.8, ship_accent),
-                            );
-                            painter.circle_filled(p, ship_marker_r * 0.35, ship_accent);
-                        }
+                    if !ship.in_transit {
+                        let sp = to_screen(ship.star_x, ship.star_y);
+                        painter.circle_stroke(
+                            sp,
+                            ship_marker_r,
+                            egui::Stroke::new(1.8, ship_accent),
+                        );
+                        painter.circle_filled(sp, ship_marker_r * 0.35, ship_accent);
+                    } else {
+                        let a = to_screen(ship.transit_from_x, ship.transit_from_y);
+                        let b = to_screen(ship.transit_to_x, ship.transit_to_y);
+                        painter.line_segment(
+                            [a, b],
+                            egui::Stroke::new(1.0, ship_line),
+                        );
+                        let now = Timestamp::now();
+                        let n = now.to_micros_since_unix_epoch();
+                        let d0 = ship.transit_depart_at.to_micros_since_unix_epoch();
+                        let d1 = ship.transit_arrive_at.to_micros_since_unix_epoch();
+                        let frac = if d1 <= d0 {
+                            1.0_f32
+                        } else {
+                            (((n - d0) as f64 / (d1 - d0) as f64) as f32).clamp(0.0, 1.0)
+                        };
+                        let p = a.lerp(b, frac);
+                        painter.circle_stroke(
+                            p,
+                            ship_marker_r,
+                            egui::Stroke::new(1.8, ship_accent),
+                        );
+                        painter.circle_filled(p, ship_marker_r * 0.35, ship_accent);
                     }
                 }
 
@@ -1485,21 +1752,22 @@ impl ExplorerApp {
                     );
                     hud_y += 14.0;
                     for s in self.my_ships.iter().take(5) {
-                        let line = match &s.location {
-                            ShipLocation::AtStar(loc) => format!(
+                        let line = if !s.in_transit {
+                            format!(
                                 "  #{}  ({:.1}, {:.1}) ly",
                                 s.id,
-                                grid_to_ly(loc.star_x),
-                                grid_to_ly(loc.star_y),
-                            ),
-                            ShipLocation::InTransit(t) => format!(
+                                grid_to_ly(s.star_x),
+                                grid_to_ly(s.star_y),
+                            )
+                        } else {
+                            format!(
                                 "  #{}  transit  ({:.1},{:.1})→({:.1},{:.1}) ly",
                                 s.id,
-                                grid_to_ly(t.from_star_x),
-                                grid_to_ly(t.from_star_y),
-                                grid_to_ly(t.to_star_x),
-                                grid_to_ly(t.to_star_y),
-                            ),
+                                grid_to_ly(s.transit_from_x),
+                                grid_to_ly(s.transit_from_y),
+                                grid_to_ly(s.transit_to_x),
+                                grid_to_ly(s.transit_to_y),
+                            )
                         };
                         painter.text(
                             hud_origin + Vec2::new(0.0, hud_y),

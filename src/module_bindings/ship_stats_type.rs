@@ -4,17 +4,17 @@
 #![allow(unused, clippy::all)]
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
-use super::ship_at_star_type::ShipAtStar;
-use super::ship_in_transit_type::ShipInTransit;
-
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
-pub enum ShipLocation {
-    AtStar(ShipAtStar),
-
-    InTransit(ShipInTransit),
+pub struct ShipStats {
+    pub size_kt: u32,
+    pub speed_lys: f64,
+    pub defense: u32,
+    pub attack: u32,
+    pub battery_ly: u32,
+    pub radar_ly: u32,
 }
 
-impl __sdk::InModule for ShipLocation {
+impl __sdk::InModule for ShipStats {
     type Module = super::RemoteModule;
 }

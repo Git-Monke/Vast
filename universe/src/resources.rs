@@ -60,6 +60,44 @@ impl Material {
     }
 }
 
+/// Government sink: baseline credits per kt when selling at a Sales Depot.
+pub const BASELINE_CREDITS_PER_KT_IRON: u64 = 10;
+/// Government sink: baseline credits per kt for helium.
+pub const BASELINE_CREDITS_PER_KT_HELIUM: u64 = 15;
+
+#[must_use]
+pub fn baseline_credits_per_kt(kind: MaterialKind) -> u64 {
+    match kind {
+        MaterialKind::Iron => BASELINE_CREDITS_PER_KT_IRON,
+        MaterialKind::Helium => BASELINE_CREDITS_PER_KT_HELIUM,
+    }
+}
+
+/// Credits paid for `kt` of `kind` at baseline prices (`floor` of fractional kt).
+#[must_use]
+pub fn credits_for_kt_sale(kind: MaterialKind, kt: f64) -> u64 {
+    if kt <= 0.0 || !kt.is_finite() {
+        return 0;
+    }
+    let p = baseline_credits_per_kt(kind) as f64;
+    (kt * p).floor() as u64
+}
+
+/// Total credits for selling `materials` at baseline (per-kind kt summed, then one `floor` per kind).
+#[must_use]
+pub fn credits_for_materials_sale(materials: &[Material]) -> u64 {
+    let mut total = 0u64;
+    for &k in MaterialKind::ALL {
+        let kt: f64 = materials
+            .iter()
+            .filter(|m| m.kind() == k)
+            .map(Material::amount)
+            .sum();
+        total = total.saturating_add(credits_for_kt_sale(k, kt));
+    }
+    total
+}
+
 fn spawn_iron(temp_k: f64, p_type: PlanetType, x: i32, y: i32, idx: u8) -> Option<Material> {
     if matches!(p_type, PlanetType::Solid) && temp_k < 1000.0 {
         let mult = 1.0 + point_to_random(x, y, RESOURCE_SEED.wrapping_add(idx as u64)) * 2.0;
