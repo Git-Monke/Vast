@@ -8,11 +8,97 @@ use universe::material_stock::{
 use universe::settings::COORD_UNITS_PER_LY;
 use universe::{Material, MaterialKind, ShipStats};
 
+use crate::battle::{CombatantId, CombatantResult};
 use crate::constants::{
-    MAX_STARTER_SAMPLE_ATTEMPTS, STARTER_DISK_RADIUS_LY, STARTER_LOCAL_GRID,
-    STARTER_LOCAL_HALF,
+    MAX_STARTER_SAMPLE_ATTEMPTS, STARTER_DISK_RADIUS_LY, STARTER_LOCAL_GRID, STARTER_LOCAL_HALF,
 };
-use crate::{building, empire, ship, BuildingKind, Empire, Ship};
+use crate::{
+    Building, BuildingKind, Empire, PlayerPresence, Ship, building, empire, player_presence, ship,
+};
+
+pub(crate) fn apply_battle_results(ctx: &ReducerContext, battle_results: Vec<CombatantResult>) {
+    for result in battle_results {
+        match result.id {
+            CombatantId::Ship(id) => {
+                if let Some(ship) = ctx.db.ship().id().find(&id) {
+                    if result.damage_taken >= ship.health {
+                        let owner = ship.owner;
+                        let star_x = ship.star_x;
+                        let star_y = ship.star_y;
+                        ctx.db.ship().id().delete(&id);
+                        update_player_presence(ctx, owner, star_x, star_y);
+                    } else {
+                        ctx.db.ship().id().update(Ship {
+                            health: ship.health - result.damage_taken,
+                            ..ship
+                        });
+                    }
+                }
+            }
+            CombatantId::Garrison(id) => {
+                if let Some(building) = ctx.db.building().id().find(&id) {
+                    if result.damage_taken >= building.health {
+                        let owner = building.owner;
+                        let star_x = building.star_x;
+                        let star_y = building.star_y;
+                        let kind = building.kind;
+                        ctx.db.building().id().delete(&id);
+                        if kind == BuildingKind::Radar {
+                            if let Some(owner_id) = owner {
+                                update_player_presence(ctx, owner_id, star_x, star_y);
+                            }
+                        }
+                    } else {
+                        ctx.db.building().id().update(Building {
+                            health: building.health - result.damage_taken,
+                            ..building
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn update_player_presence(
+    ctx: &ReducerContext,
+    empire_id: Identity,
+    star_x: i32,
+    star_y: i32,
+) {
+    let has_ship = ctx
+        .db
+        .ship()
+        .ship_by_docked_star()
+        .filter((false, star_x, star_y))
+        .any(|s| s.owner == empire_id);
+    let has_radar = ctx
+        .db
+        .building()
+        .building_by_planet_location()
+        .filter((star_x, star_y))
+        .any(|b| b.owner == Some(empire_id) && b.kind == BuildingKind::Radar);
+
+    let existing = ctx
+        .db
+        .player_presence()
+        .presence_by_star_and_empire()
+        .filter((star_x, star_y, empire_id))
+        .next();
+
+    if has_ship || has_radar {
+        if existing.is_none() {
+            ctx.db.player_presence().insert(PlayerPresence {
+                id: 0,
+                star_x,
+                star_y,
+                empire_id,
+            });
+        }
+    } else if let Some(row) = existing {
+        ctx.db.player_presence().id().delete(&row.id);
+    }
+}
 
 pub(crate) fn owner_has_any_ship(ctx: &ReducerContext, owner: Identity) -> bool {
     ctx.db.ship().iter().any(|s| s.owner == owner)

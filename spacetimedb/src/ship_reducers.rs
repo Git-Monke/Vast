@@ -7,8 +7,8 @@ use universe::{ShipAttackMode, ShipStats};
 
 use crate::combat::resolve_battle_at_star;
 use crate::db_helpers::{
-    docked_ships_at_star, find_empty_red_dwarf_starter, jump_ready_after_charge_at_star,
-    owner_has_any_ship,
+    find_empty_red_dwarf_starter, jump_ready_after_charge_at_star, owner_has_any_ship,
+    update_player_presence,
 };
 use crate::{Ship, WarpJob};
 
@@ -52,6 +52,8 @@ pub fn spawn_starter_ship(ctx: &ReducerContext) -> Result<(), String> {
         jump_ready_at,
         health,
     });
+
+    update_player_presence(ctx, ctx.sender(), star_x, star_y);
 
     Ok(())
 }
@@ -127,6 +129,8 @@ pub fn order_warp(
         ..ship
     });
 
+    update_player_presence(ctx, ship.owner, from_x, from_y);
+
     Ok(())
 }
 
@@ -167,8 +171,10 @@ pub fn complete_warp(ctx: &ReducerContext, job: WarpJob) -> Result<(), String> {
         ..ship
     });
 
+    update_player_presence(ctx, ship.owner, job.to_star_x, job.to_star_y);
+
     if strike_first_arrival {
-        let others = docked_ships_at_star(ctx, job.to_star_x, job.to_star_y)
+        let others = crate::db_helpers::docked_ships_at_star(ctx, job.to_star_x, job.to_star_y)
             .into_iter()
             .any(|s| s.owner != aggressor);
         if others {
@@ -225,7 +231,7 @@ pub fn set_ship_attack_mode(
     });
 
     if want_strike {
-        let others = docked_ships_at_star(ctx, sx, sy)
+        let others = crate::db_helpers::docked_ships_at_star(ctx, sx, sy)
             .into_iter()
             .any(|s| s.owner != aggressor);
         if others {

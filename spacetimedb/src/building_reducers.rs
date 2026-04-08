@@ -10,7 +10,7 @@ use universe::generator::generate_star;
 
 use crate::db_helpers::{
     count_sales_depots_owned, deduct_credits, max_ship_size_kt_at_star, planet_has_enemy_garrison,
-    player_has_stationed_ship_at_star, slot_occupied,
+    player_has_stationed_ship_at_star, slot_occupied, update_player_presence,
 };
 use crate::{Building, BuildingKind};
 use universe::ShipAttackMode;
@@ -152,6 +152,12 @@ pub fn place_building(
         attack_mode,
         health,
     });
+
+    if kind == BuildingKind::Radar {
+        if let Some(owner_id) = owner {
+            update_player_presence(ctx, owner_id, star_x, star_y);
+        }
+    }
 
     Ok(())
 }

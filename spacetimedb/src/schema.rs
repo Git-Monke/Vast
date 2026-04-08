@@ -1,4 +1,4 @@
-use spacetimedb::{Identity, ScheduleAt, SpacetimeType, Timestamp};
+use spacetimedb::{Identity, ScheduleAt, SpacetimeType, Timestamp, ViewContext};
 use universe::{Material, ShipAttackMode, ShipStats};
 
 #[derive(SpacetimeType, Clone, Copy, Debug, PartialEq)]
@@ -9,6 +9,20 @@ pub enum BuildingKind {
     SalesDepot,
     ShipDepot,
     Radar,
+}
+
+pub(crate) fn player_has_presence_at_star(
+    ctx: &ViewContext,
+    player: Identity,
+    star_x: i32,
+    star_y: i32,
+) -> bool {
+    ctx.db
+        .player_presence()
+        .presence_by_star_and_empire()
+        .filter((star_x, star_y, player))
+        .next()
+        .is_some()
 }
 
 /// Stable procedural planet key for hashing and logging (no `planet` table row).
@@ -45,7 +59,6 @@ pub struct Empire {
 
 #[spacetimedb::table(
     accessor = building,
-    public,
     index(
         accessor = building_by_planet_location,
         btree(columns = [star_x, star_y, planet_index])
@@ -54,7 +67,8 @@ pub struct Empire {
         accessor = building_by_planet_slot,
         btree(columns = [star_x, star_y, planet_index, slot_index])
     ),
-    index(accessor = building_by_owner, btree(columns = [owner]))
+    index(accessor = building_by_owner, btree(columns = [owner])),
+    index(accessor = building_by_star, btree(columns = [star_x, star_y]))
 )]
 pub struct Building {
     #[primary_key]
@@ -79,8 +93,67 @@ pub struct Building {
     pub health: u32,
 }
 
+#[spacetimedb::table(
+    accessor = player_presence,
+    index(
+        accessor = presence_by_star_and_empire,
+        btree(columns = [star_x, star_y, empire_id])
+    ),
+    index(
+        accessor = presence_by_empire,
+        btree(columns = [empire_id])
+    )
+)]
+pub struct PlayerPresence {
+    #[primary_key]
+    #[auto_inc]
+    pub id: u64,
+    pub star_x: i32,
+    pub star_y: i32,
+    pub empire_id: Identity,
+}
+
+#[spacetimedb::view(accessor = my_ships, public)]
+pub fn my_ships(ctx: &ViewContext) -> Vec<Ship> {
+    ctx.db.ship().ship_by_owner().filter(ctx.sender()).collect()
+}
+
+#[spacetimedb::view(accessor = visible_buildings, public)]
+pub fn visible_buildings(ctx: &ViewContext) -> Vec<Building> {
+    let sender = ctx.sender();
+    ctx.db
+        .player_presence()
+        .presence_by_empire()
+        .filter(sender)
+        .flat_map(|p| {
+            ctx.db
+                .building()
+                .building_by_star()
+                .filter((p.star_x, p.star_y)) // index on (star_x, star_y)
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_star_system_stock, public)]
+pub fn visible_star_system_stock(ctx: &ViewContext) -> Vec<StarSystemStock> {
+    let sender = ctx.sender();
+    ctx.db
+        .player_presence()
+        .presence_by_empire()
+        .filter(sender)
+        .flat_map(|p| {
+            ctx.db
+                .star_system_stock()
+                .stock_by_location()
+                .filter((p.star_x, p.star_y)) // index on (star_x, star_y)
+        })
+        .collect()
+}
+
 /// Shared star-system warehouse state: settled kt per material, lazy mining via [`last_settled_at`].
-#[spacetimedb::table(accessor = star_system_stock, public)]
+#[spacetimedb::table(accessor = star_system_stock,
+    index(accessor = stock_by_location, btree(columns = [star_x, star_y])),
+    )]
 pub struct StarSystemStock {
     #[primary_key]
     pub star_location_id: u128,
@@ -95,7 +168,6 @@ pub struct StarSystemStock {
 
 #[spacetimedb::table(
     accessor = ship,
-    public,
     index(accessor = ship_by_owner, btree(columns = [owner])),
     index(
         accessor = ship_by_docked_star,

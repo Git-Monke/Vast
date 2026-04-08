@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **AI Context Documentation:** Created `AI_CONTEXT.md` to provide a dense overview of the codebase architecture, key modules, and common update patterns for AI agents.
+
 ### Fixed
 
 - **SpacetimeDB — scanning:** `complete_scan` now deletes any existing `ScanResult` for the same empire and star location before inserting a new one, ensuring users only fetch and store the latest data for a system.
@@ -12,6 +16,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **SpacetimeDB — Access Control Views:** Implemented views to enforce data privacy. Players now only see their own ships via the `my_ships` view. Information about star system buildings and stock is now restricted to systems where the player has a "presence" (either a docked ship or an owned radar) via `visible_buildings` and `visible_star_system_stock` views. The `Ship`, `Building`, and `StarSystemStock` tables are no longer public.
 - **SpacetimeDB — combat at stars (two-team battle):** **`resolve_battle_at_star`** runs **`run_battle`** for the aggressor’s docked ships + their garrisons vs everyone else at **`(star_x, star_y)`**, then applies damage. **`complete_warp`** triggers a battle when the arriving ship is **`StrikeFirst`** and other players’ ships are docked there. **`set_ship_attack_mode(ship_id, attack_mode)`** updates mode and triggers the same battle when switching to **`StrikeFirst`** with others present. **`collect_star_resources`** and **`sell_star_warehouse`** call **`resolve_battle_at_star`** first when an **enemy military garrison** is at the star, then **return without** settling/collecting or selling in that same reducer call so the client can read combat results and retry. **`execute_battle`** still resolves combat on demand. Regenerate **`vast-bindings`** after pulling so clients see **`set_ship_attack_mode`**.
 
 - **SpacetimeDB — Sales Depot (government sink):** baseline credits per kt in [`universe::resources`](universe/src/resources.rs) (**Iron 10**, **Helium 15**). Reducers **`sell_ship_cargo(ship_id, amounts)`** and **`sell_star_warehouse(ship_id, amounts)`** require the caller’s ship **`AtStar`** and **any** **`SalesDepot`** at that **`(star_x, star_y)`**; **`amounts`** empty means sell **everything** from ship cargo or from settled warehouse stock (after **`settle_star_resources`** for warehouse). Credits are added to **`Empire.credits`** (`u64` saturating). **`universe::credits_for_materials_sale`** matches server payout (per-kind `floor(kt × price)`).

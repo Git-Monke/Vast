@@ -1,40 +1,9 @@
 use spacetimedb::{Identity, ReducerContext, Table};
 
-use crate::battle::{Combatant, CombatantId, CombatantResult, run_battle};
+use crate::db_helpers::{apply_battle_results, docked_ships_at_star};
 use crate::{building, ship};
-use crate::db_helpers::docked_ships_at_star;
 use crate::{Building, BuildingKind, Ship};
-
-pub(crate) fn apply_battle_results(ctx: &ReducerContext, battle_results: Vec<CombatantResult>) {
-    for result in battle_results {
-        match result.id {
-            CombatantId::Ship(id) => {
-                if let Some(ship) = ctx.db.ship().id().find(&id) {
-                    if result.damage_taken >= ship.health {
-                        ctx.db.ship().id().delete(&id);
-                    } else {
-                        ctx.db.ship().id().update(Ship {
-                            health: ship.health - result.damage_taken,
-                            ..ship
-                        });
-                    }
-                }
-            }
-            CombatantId::Garrison(id) => {
-                if let Some(building) = ctx.db.building().id().find(&id) {
-                    if result.damage_taken >= building.health {
-                        ctx.db.building().id().delete(&id);
-                    } else {
-                        ctx.db.building().id().update(Building {
-                            health: building.health - result.damage_taken,
-                            ..building
-                        });
-                    }
-                }
-            }
-        }
-    }
-}
+use crate::battle::{Combatant, run_battle};
 
 /// Aggressor vs everyone else at the star: all docked ships and all garrisons participate.
 /// No-op if there is nothing to fight. Errors if the aggressor has no ships or garrisons there while enemies exist.
