@@ -1,5 +1,6 @@
 use spacetimedb::{ReducerContext, Table};
 
+use crate::keys::generate_planet_key;
 use crate::building_rules::{
     credits_delta_upgrade, credits_for_leveled_place, min_ship_kt_for_level, sales_depot_next_cost,
 };
@@ -31,7 +32,8 @@ pub fn place_building(
         return Err("Register an empire first".to_string());
     }
 
-    let Some(sys) = generate_star(star_x, star_y) else {
+    let planet_generator_key = generate_planet_key(star_x, star_y);
+    let Some(sys) = generate_star(star_x, star_y, Some(planet_generator_key)) else {
         return Err("No star system at these coordinates".to_string());
     };
 

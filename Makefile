@@ -2,6 +2,7 @@ publish:
 	spacetime publish --server http://localhost:3000 --anonymous vast
 
 build:
+	spacetime generate --lang rust --out-dir ./vast-bindings/src
 	spacetime build
 
 explore:

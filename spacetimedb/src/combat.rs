@@ -1,5 +1,6 @@
 use spacetimedb::{Identity, ReducerContext, Table};
 
+use crate::keys::generate_planet_key;
 use crate::db_helpers::{apply_battle_results, docked_ships_at_star};
 use crate::{building, ship};
 use crate::{Building, BuildingKind, Ship};

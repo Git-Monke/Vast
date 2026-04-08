@@ -1,5 +1,6 @@
 use spacetimedb::ReducerContext;
 
+use crate::keys::generate_planet_key;
 use crate::star_economy::{cargo_total_kt, settle_star_resources};
 use crate::{empire, ship, star_system_stock};
 use universe::material_stock::{merge_into_cargo, total_kt, try_subtract_materials};

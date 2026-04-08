@@ -1,3 +1,4 @@
+use crate::keys::generate_planet_key;
 use spacetimedb::{ReducerContext, Table, TimeDuration, Timestamp};
 use universe::generator::star_info_at;
 

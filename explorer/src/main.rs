@@ -21,13 +21,23 @@ use universe::{
     BASELINE_CREDITS_PER_KT_IRON,
 };
 use vast_bindings::{
-    buildingQueryTableAccess, collect_star_resources, empireQueryTableAccess, initiate_scan,
-    order_warp, place_building, register_empire, scan_jobQueryTableAccess,
-    scan_resultQueryTableAccess, sell_ship_cargo, sell_star_warehouse, shipQueryTableAccess,
-    spawn_starter_ship, star_system_stockQueryTableAccess, upgrade_building, Building,
-    BuildingKind, BuildingTableAccess, DbConnection, Empire, EmpireTableAccess, Material,
-    ScanInitiator, ScanJob, ScanJobTableAccess, ScanResult, ScanResultTableAccess, Ship,
-    ShipAttackMode, ShipTableAccess, StarSystemStock, StarSystemStockTableAccess,
+    building_kind_type::BuildingKind, collect_star_resources_reducer::collect_star_resources,
+    empire_table::EmpireTableAccess, empire_type::Empire,
+    initiate_scan_reducer::initiate_scan, material_type::Material,
+    my_ships_table::MyShipsTableAccess, order_warp_reducer::order_warp,
+    place_building_reducer::place_building,
+    register_empire_reducer::register_empire, scan_job_table::ScanJobTableAccess,
+    scan_job_type::ScanJob, scan_result_table::ScanResultTableAccess,
+    scan_result_type::ScanResult, sell_ship_cargo_reducer::sell_ship_cargo,
+    sell_star_warehouse_reducer::sell_star_warehouse,
+    ship_attack_mode_type::ShipAttackMode, ship_type::Ship,
+    spawn_starter_ship_reducer::spawn_starter_ship, star_system_stock_type::StarSystemStock,
+    upgrade_building_reducer::upgrade_building,
+    visible_buildings_table::VisibleBuildingsTableAccess,
+    visible_star_system_stock_table::VisibleStarSystemStockTableAccess, Building, DbConnection,
+    ScanInitiator, empireQueryTableAccess, my_shipsQueryTableAccess, scan_jobQueryTableAccess,
+    scan_resultQueryTableAccess, visible_buildingsQueryTableAccess,
+    visible_star_system_stockQueryTableAccess,
 };
 
 const ZOOM_MIN: f64 = 0.1; // pixels per light-year (max zoom out)
@@ -58,7 +68,7 @@ fn planet_has_enemy_garrison(buildings: &[Building], planet_index: u8, me: Ident
 
 fn count_my_sales_depots(conn: &DbConnection, me: Identity) -> u32 {
     conn.db()
-        .building()
+        .visible_buildings()
         .iter()
         .filter(|b| b.kind == BuildingKind::SalesDepot && b.owner == Some(me))
         .count() as u32
@@ -408,9 +418,9 @@ impl ExplorerApp {
                         eprintln!("subscription error: {e}");
                     })
                     .add_query(|q| q.from.empire())
-                    .add_query(|q| q.from.building())
-                    .add_query(|q| q.from.ship())
-                    .add_query(|q| q.from.star_system_stock())
+                    .add_query(|q| q.from.visible_buildings())
+                    .add_query(|q| q.from.my_ships())
+                    .add_query(|q| q.from.visible_star_system_stock())
                     .add_query(|q| q.from.scan_job())
                     .add_query(|q| q.from.scan_result())
                     .subscribe();
@@ -450,24 +460,9 @@ impl ExplorerApp {
             return;
         };
         self.my_empire = conn.db().empire().iter().find(|e| e.identity == id);
-        self.my_ships.clear();
-        for s in conn.db().ship().iter() {
-            if s.owner == id {
-                self.my_ships.push(s);
-            }
-        }
-        self.my_scan_jobs.clear();
-        for j in conn.db().scan_job().iter() {
-            if j.empire_id == id {
-                self.my_scan_jobs.push(j);
-            }
-        }
-        self.my_scan_results.clear();
-        for r in conn.db().scan_result().iter() {
-            if r.empire_id == id {
-                self.my_scan_results.push(r);
-            }
-        }
+        self.my_ships = conn.db().my_ships().iter().collect();
+        self.my_scan_jobs = conn.db().scan_job().iter().collect();
+        self.my_scan_results = conn.db().scan_result().iter().collect();
         if !self.did_center_camera {
             if let Some(ship) = self.my_ships.first() {
                 if !ship.in_transit {
@@ -498,7 +493,7 @@ impl ExplorerApp {
         let sid_loc = star_location_id(star_x, star_y);
         self.star_panel_cached_stock = conn
             .db()
-            .star_system_stock()
+            .visible_star_system_stock()
             .iter()
             .find(|s| s.star_location_id == sid_loc);
 
@@ -507,7 +502,7 @@ impl ExplorerApp {
         if need_buildings {
             self.star_panel_cached_buildings = conn
                 .db()
-                .building()
+                .visible_buildings()
                 .iter()
                 .filter(|b| b.star_x == star_x && b.star_y == star_y)
                 .collect();
@@ -1813,7 +1808,8 @@ impl ExplorerApp {
                     if let Some((d2, lx, ly)) = nearest {
                         let threshold = (visual_radius(1.0, self.zoom) + 6.0).powi(2);
                         if d2 <= threshold {
-                            self.selected = generate_star(lx, ly);
+                            let key = self.my_scan_results.iter().find(|r| r.star_x == lx && r.star_y == ly).map(|r| r.planet_generator_key);
+                            self.selected = generate_star(lx, ly, key);
                         } else {
                             self.selected = None;
                         }

@@ -193,58 +193,62 @@ pub fn star_info_at(x: i32, y: i32) -> Option<(StarType, f64)> {
     Some((star_type, size))
 }
 
-pub fn generate_star(x: i32, y: i32) -> Option<StarSystem> {
+pub fn generate_star(x: i32, y: i32, key: Option<u64>) -> Option<StarSystem> {
     if !star_is_at_point(x, y) {
         return None;
     }
 
     let star_type = hash_to_star_type(point_hash(x, y, STAR_TYPE_SEED));
-    let planet_count = hash_to_planet_count(point_hash(x, y, PLANET_COUNT_SEED));
-    let star_temp = star_type.temperature_k();
-
+    
     let (sz_min, sz_max) = star_type.size_range_solar_radii();
     let star_size_solar_radii = sz_min + (sz_max - sz_min) * point_to_random(x, y, STAR_SIZE_SEED);
 
-    let (r_min, r_max) = star_type.richness_range();
+    let mut planets = Vec::new();
 
-    // First orbit: 0.1–0.5 AU; each successive orbit multiplies by 1.4–2.0
-    let mut distance_au = 0.1 + point_to_random(x, y, PLANET_DIST_SEED) * 0.4;
-    let mut planets = Vec::with_capacity(planet_count as usize);
+    if let Some(k) = key {
+        let planet_count = hash_to_planet_count(point_hash(x, y, PLANET_COUNT_SEED ^ k));
+        let star_temp = star_type.temperature_k();
+        let (r_min, r_max) = star_type.richness_range();
 
-    for i in 0..planet_count {
-        if i > 0 {
-            let spacing =
-                1.4 + point_to_random(x, y, PLANET_DIST_SEED.wrapping_add(i as u64)) * 0.6;
-            distance_au *= spacing;
+        // First orbit: 0.1–0.5 AU; each successive orbit multiplies by 1.4–2.0
+        let mut distance_au = 0.1 + point_to_random(x, y, PLANET_DIST_SEED ^ k) * 0.4;
+        planets.reserve(planet_count as usize);
+
+        for i in 0..planet_count {
+            if i > 0 {
+                let spacing =
+                    1.4 + point_to_random(x, y, (PLANET_DIST_SEED ^ k).wrapping_add(i as u64)) * 0.6;
+                distance_au *= spacing;
+            }
+
+            let temp_k = planet_temperature_k(star_temp, i);
+            let type_random = point_to_random(x, y, (PLANET_TYPE_SEED ^ k).wrapping_add(i as u64));
+            let planet_type = planet_type_from_temp(temp_k, type_random);
+
+            let size_random = point_to_random(x, y, (PLANET_SIZE_SEED ^ k).wrapping_add(i as u64));
+            let size: u8 = (match planet_type {
+                PlanetType::Gas => 1.0 + size_random * 4.0, // 1–5 orbital platforms
+                PlanetType::Ocean => 4.0 + size_random * 4.0, // 4–8 large habitable surface
+                PlanetType::Solid => 2.0 + size_random * 8.0, // 2–10 most variable
+            } as u8)
+                .max(1);
+
+            let richness = r_min
+                + (r_max - r_min) * point_to_random(x, y, (PLANET_RICHNESS_SEED ^ k).wrapping_add(i as u64));
+
+            let resources = collect_materials(temp_k, planet_type, x, y, i, k);
+
+            planets.push(Planet {
+                index: i,
+                name: String::new(),
+                distance_au,
+                temperature_k: temp_k,
+                planet_type,
+                size,
+                richness,
+                resources,
+            });
         }
-
-        let temp_k = planet_temperature_k(star_temp, i);
-        let type_random = point_to_random(x, y, PLANET_TYPE_SEED.wrapping_add(i as u64));
-        let planet_type = planet_type_from_temp(temp_k, type_random);
-
-        let size_random = point_to_random(x, y, PLANET_SIZE_SEED.wrapping_add(i as u64));
-        let size: u8 = (match planet_type {
-            PlanetType::Gas => 1.0 + size_random * 4.0, // 1–5 orbital platforms
-            PlanetType::Ocean => 4.0 + size_random * 4.0, // 4–8 large habitable surface
-            PlanetType::Solid => 2.0 + size_random * 8.0, // 2–10 most variable
-        } as u8)
-            .max(1);
-
-        let richness = r_min
-            + (r_max - r_min) * point_to_random(x, y, PLANET_RICHNESS_SEED.wrapping_add(i as u64));
-
-        let resources = collect_materials(temp_k, planet_type, x, y, i);
-
-        planets.push(Planet {
-            index: i,
-            name: String::new(),
-            distance_au,
-            temperature_k: temp_k,
-            planet_type,
-            size,
-            richness,
-            resources,
-        });
     }
 
     Some(StarSystem {

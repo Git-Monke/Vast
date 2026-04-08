@@ -5,7 +5,7 @@ use universe::{
     settings::distance_between_cells_ly,
 };
 
-use crate::{BuildingKind, building, buildling_settings::RADAR_MAX_LY_FOR_LEVEL, ship};
+use crate::{BuildingKind, building, buildling_settings::RADAR_MAX_LY_FOR_LEVEL, ship, keys::generate_planet_key};
 
 #[derive(SpacetimeType, Clone, Copy, Debug, PartialEq)]
 pub enum ScanInitiator {
@@ -73,6 +73,7 @@ pub struct ScanResult {
     pub star_x: i32,
     pub star_y: i32,
 
+    pub planet_generator_key: u64,
     pub planets: Vec<ScannedPlanet>,
     pub docked_ships: Vec<ScannedDockedShip>,
 }
@@ -186,7 +187,9 @@ pub fn complete_scan(ctx: &ReducerContext, job: ScanJob) -> Result<(), String> {
         ctx.db.scan_result().id().delete(&id);
     }
 
-    let sys = generate_star(job.to_star_x, job.to_star_y)
+    let planet_generator_key = generate_planet_key(job.to_star_x, job.to_star_y);
+
+    let sys = generate_star(job.to_star_x, job.to_star_y, Some(planet_generator_key))
         .ok_or_else(|| "No star system at destination".to_string())?;
 
     let planets = sys
@@ -238,6 +241,7 @@ pub fn complete_scan(ctx: &ReducerContext, job: ScanJob) -> Result<(), String> {
         empire_id: job.empire_id,
         star_x: job.to_star_x,
         star_y: job.to_star_y,
+        planet_generator_key,
         planets,
         docked_ships,
     });

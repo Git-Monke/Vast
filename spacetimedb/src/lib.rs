@@ -14,4 +14,5 @@ mod economy_reducers;
 mod empire_reducers;
 mod ship_reducers;
 
+mod keys;
 mod scanning;

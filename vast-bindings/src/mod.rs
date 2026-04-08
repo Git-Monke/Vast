@@ -7,7 +7,6 @@
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 pub mod building_kind_type;
-pub mod building_table;
 pub mod building_type;
 pub mod collect_star_resources_reducer;
 pub mod empire_table;
@@ -15,9 +14,11 @@ pub mod empire_type;
 pub mod execute_battle_reducer;
 pub mod initiate_scan_reducer;
 pub mod material_type;
+pub mod my_ships_table;
 pub mod order_warp_reducer;
 pub mod place_building_reducer;
 pub mod planet_type_type;
+pub mod player_presence_type;
 pub mod register_empire_reducer;
 pub mod scan_initiator_type;
 pub mod scan_job_table;
@@ -32,16 +33,15 @@ pub mod sell_star_warehouse_reducer;
 pub mod set_ship_attack_mode_reducer;
 pub mod ship_attack_mode_type;
 pub mod ship_stats_type;
-pub mod ship_table;
 pub mod ship_type;
 pub mod spawn_starter_ship_reducer;
-pub mod star_system_stock_table;
 pub mod star_system_stock_type;
 pub mod upgrade_building_reducer;
+pub mod visible_buildings_table;
+pub mod visible_star_system_stock_table;
 pub mod warp_job_type;
 
 pub use building_kind_type::BuildingKind;
-pub use building_table::*;
 pub use building_type::Building;
 pub use collect_star_resources_reducer::collect_star_resources;
 pub use empire_table::*;
@@ -49,9 +49,11 @@ pub use empire_type::Empire;
 pub use execute_battle_reducer::execute_battle;
 pub use initiate_scan_reducer::initiate_scan;
 pub use material_type::Material;
+pub use my_ships_table::*;
 pub use order_warp_reducer::order_warp;
 pub use place_building_reducer::place_building;
 pub use planet_type_type::PlanetType;
+pub use player_presence_type::PlayerPresence;
 pub use register_empire_reducer::register_empire;
 pub use scan_initiator_type::ScanInitiator;
 pub use scan_job_table::*;
@@ -66,12 +68,12 @@ pub use sell_star_warehouse_reducer::sell_star_warehouse;
 pub use set_ship_attack_mode_reducer::set_ship_attack_mode;
 pub use ship_attack_mode_type::ShipAttackMode;
 pub use ship_stats_type::ShipStats;
-pub use ship_table::*;
 pub use ship_type::Ship;
 pub use spawn_starter_ship_reducer::spawn_starter_ship;
-pub use star_system_stock_table::*;
 pub use star_system_stock_type::StarSystemStock;
 pub use upgrade_building_reducer::upgrade_building;
+pub use visible_buildings_table::*;
+pub use visible_star_system_stock_table::*;
 pub use warp_job_type::WarpJob;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -251,12 +253,12 @@ impl __sdk::Reducer for Reducer {
 #[allow(non_snake_case)]
 #[doc(hidden)]
 pub struct DbUpdate {
-    building: __sdk::TableUpdate<Building>,
     empire: __sdk::TableUpdate<Empire>,
+    my_ships: __sdk::TableUpdate<Ship>,
     scan_job: __sdk::TableUpdate<ScanJob>,
     scan_result: __sdk::TableUpdate<ScanResult>,
-    ship: __sdk::TableUpdate<Ship>,
-    star_system_stock: __sdk::TableUpdate<StarSystemStock>,
+    visible_buildings: __sdk::TableUpdate<Building>,
+    visible_star_system_stock: __sdk::TableUpdate<StarSystemStock>,
 }
 
 impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
@@ -265,24 +267,24 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_update in __sdk::transaction_update_iter_table_updates(raw) {
             match &table_update.table_name[..] {
-                "building" => db_update
-                    .building
-                    .append(building_table::parse_table_update(table_update)?),
                 "empire" => db_update
                     .empire
                     .append(empire_table::parse_table_update(table_update)?),
+                "my_ships" => db_update
+                    .my_ships
+                    .append(my_ships_table::parse_table_update(table_update)?),
                 "scan_job" => db_update
                     .scan_job
                     .append(scan_job_table::parse_table_update(table_update)?),
                 "scan_result" => db_update
                     .scan_result
                     .append(scan_result_table::parse_table_update(table_update)?),
-                "ship" => db_update
-                    .ship
-                    .append(ship_table::parse_table_update(table_update)?),
-                "star_system_stock" => db_update
-                    .star_system_stock
-                    .append(star_system_stock_table::parse_table_update(table_update)?),
+                "visible_buildings" => db_update
+                    .visible_buildings
+                    .append(visible_buildings_table::parse_table_update(table_update)?),
+                "visible_star_system_stock" => db_update.visible_star_system_stock.append(
+                    visible_star_system_stock_table::parse_table_update(table_update)?,
+                ),
 
                 unknown => {
                     return Err(__sdk::InternalError::unknown_name(
@@ -309,9 +311,6 @@ impl __sdk::DbUpdate for DbUpdate {
     ) -> AppliedDiff<'_> {
         let mut diff = AppliedDiff::default();
 
-        diff.building = cache
-            .apply_diff_to_table::<Building>("building", &self.building)
-            .with_updates_by_pk(|row| &row.id);
         diff.empire = cache
             .apply_diff_to_table::<Empire>("empire", &self.empire)
             .with_updates_by_pk(|row| &row.identity);
@@ -321,12 +320,13 @@ impl __sdk::DbUpdate for DbUpdate {
         diff.scan_result = cache
             .apply_diff_to_table::<ScanResult>("scan_result", &self.scan_result)
             .with_updates_by_pk(|row| &row.id);
-        diff.ship = cache
-            .apply_diff_to_table::<Ship>("ship", &self.ship)
-            .with_updates_by_pk(|row| &row.id);
-        diff.star_system_stock = cache
-            .apply_diff_to_table::<StarSystemStock>("star_system_stock", &self.star_system_stock)
-            .with_updates_by_pk(|row| &row.star_location_id);
+        diff.my_ships = cache.apply_diff_to_table::<Ship>("my_ships", &self.my_ships);
+        diff.visible_buildings =
+            cache.apply_diff_to_table::<Building>("visible_buildings", &self.visible_buildings);
+        diff.visible_star_system_stock = cache.apply_diff_to_table::<StarSystemStock>(
+            "visible_star_system_stock",
+            &self.visible_star_system_stock,
+        );
 
         diff
     }
@@ -334,11 +334,11 @@ impl __sdk::DbUpdate for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_rows in raw.tables {
             match &table_rows.table[..] {
-                "building" => db_update
-                    .building
-                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "empire" => db_update
                     .empire
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "my_ships" => db_update
+                    .my_ships
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "scan_job" => db_update
                     .scan_job
@@ -346,11 +346,11 @@ impl __sdk::DbUpdate for DbUpdate {
                 "scan_result" => db_update
                     .scan_result
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
-                "ship" => db_update
-                    .ship
+                "visible_buildings" => db_update
+                    .visible_buildings
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
-                "star_system_stock" => db_update
-                    .star_system_stock
+                "visible_star_system_stock" => db_update
+                    .visible_star_system_stock
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 unknown => {
                     return Err(
@@ -365,11 +365,11 @@ impl __sdk::DbUpdate for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_rows in raw.tables {
             match &table_rows.table[..] {
-                "building" => db_update
-                    .building
-                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "empire" => db_update
                     .empire
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "my_ships" => db_update
+                    .my_ships
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "scan_job" => db_update
                     .scan_job
@@ -377,11 +377,11 @@ impl __sdk::DbUpdate for DbUpdate {
                 "scan_result" => db_update
                     .scan_result
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
-                "ship" => db_update
-                    .ship
+                "visible_buildings" => db_update
+                    .visible_buildings
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
-                "star_system_stock" => db_update
-                    .star_system_stock
+                "visible_star_system_stock" => db_update
+                    .visible_star_system_stock
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 unknown => {
                     return Err(
@@ -398,12 +398,12 @@ impl __sdk::DbUpdate for DbUpdate {
 #[allow(non_snake_case)]
 #[doc(hidden)]
 pub struct AppliedDiff<'r> {
-    building: __sdk::TableAppliedDiff<'r, Building>,
     empire: __sdk::TableAppliedDiff<'r, Empire>,
+    my_ships: __sdk::TableAppliedDiff<'r, Ship>,
     scan_job: __sdk::TableAppliedDiff<'r, ScanJob>,
     scan_result: __sdk::TableAppliedDiff<'r, ScanResult>,
-    ship: __sdk::TableAppliedDiff<'r, Ship>,
-    star_system_stock: __sdk::TableAppliedDiff<'r, StarSystemStock>,
+    visible_buildings: __sdk::TableAppliedDiff<'r, Building>,
+    visible_star_system_stock: __sdk::TableAppliedDiff<'r, StarSystemStock>,
     __unused: std::marker::PhantomData<&'r ()>,
 }
 
@@ -417,14 +417,18 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
         event: &EventContext,
         callbacks: &mut __sdk::DbCallbacks<RemoteModule>,
     ) {
-        callbacks.invoke_table_row_callbacks::<Building>("building", &self.building, event);
         callbacks.invoke_table_row_callbacks::<Empire>("empire", &self.empire, event);
+        callbacks.invoke_table_row_callbacks::<Ship>("my_ships", &self.my_ships, event);
         callbacks.invoke_table_row_callbacks::<ScanJob>("scan_job", &self.scan_job, event);
         callbacks.invoke_table_row_callbacks::<ScanResult>("scan_result", &self.scan_result, event);
-        callbacks.invoke_table_row_callbacks::<Ship>("ship", &self.ship, event);
+        callbacks.invoke_table_row_callbacks::<Building>(
+            "visible_buildings",
+            &self.visible_buildings,
+            event,
+        );
         callbacks.invoke_table_row_callbacks::<StarSystemStock>(
-            "star_system_stock",
-            &self.star_system_stock,
+            "visible_star_system_stock",
+            &self.visible_star_system_stock,
             event,
         );
     }
@@ -1087,19 +1091,19 @@ impl __sdk::SpacetimeModule for RemoteModule {
     type QueryBuilder = __sdk::QueryBuilder;
 
     fn register_tables(client_cache: &mut __sdk::ClientCache<Self>) {
-        building_table::register_table(client_cache);
         empire_table::register_table(client_cache);
+        my_ships_table::register_table(client_cache);
         scan_job_table::register_table(client_cache);
         scan_result_table::register_table(client_cache);
-        ship_table::register_table(client_cache);
-        star_system_stock_table::register_table(client_cache);
+        visible_buildings_table::register_table(client_cache);
+        visible_star_system_stock_table::register_table(client_cache);
     }
     const ALL_TABLE_NAMES: &'static [&'static str] = &[
-        "building",
         "empire",
+        "my_ships",
         "scan_job",
         "scan_result",
-        "ship",
-        "star_system_stock",
+        "visible_buildings",
+        "visible_star_system_stock",
     ];
 }

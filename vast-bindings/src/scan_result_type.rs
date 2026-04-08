@@ -14,6 +14,7 @@ pub struct ScanResult {
     pub empire_id: __sdk::Identity,
     pub star_x: i32,
     pub star_y: i32,
+    pub planet_generator_key: u64,
     pub planets: Vec<ScannedPlanet>,
     pub docked_ships: Vec<ScannedDockedShip>,
 }
@@ -30,6 +31,7 @@ pub struct ScanResultCols {
     pub empire_id: __sdk::__query_builder::Col<ScanResult, __sdk::Identity>,
     pub star_x: __sdk::__query_builder::Col<ScanResult, i32>,
     pub star_y: __sdk::__query_builder::Col<ScanResult, i32>,
+    pub planet_generator_key: __sdk::__query_builder::Col<ScanResult, u64>,
     pub planets: __sdk::__query_builder::Col<ScanResult, Vec<ScannedPlanet>>,
     pub docked_ships: __sdk::__query_builder::Col<ScanResult, Vec<ScannedDockedShip>>,
 }
@@ -42,6 +44,10 @@ impl __sdk::__query_builder::HasCols for ScanResult {
             empire_id: __sdk::__query_builder::Col::new(table_name, "empire_id"),
             star_x: __sdk::__query_builder::Col::new(table_name, "star_x"),
             star_y: __sdk::__query_builder::Col::new(table_name, "star_y"),
+            planet_generator_key: __sdk::__query_builder::Col::new(
+                table_name,
+                "planet_generator_key",
+            ),
             planets: __sdk::__query_builder::Col::new(table_name, "planets"),
             docked_ships: __sdk::__query_builder::Col::new(table_name, "docked_ships"),
         }

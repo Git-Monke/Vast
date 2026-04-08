@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use spacetimedb::{ReducerContext, Table, Timestamp};
 
+use crate::keys::generate_planet_key;
 use crate::building;
 use crate::star_system_stock;
 use crate::{star_location_id, Building, BuildingKind, StarSystemStock};
@@ -82,7 +83,8 @@ pub fn ensure_star_system_stock(ctx: &ReducerContext, star_x: i32, star_y: i32) 
 
 /// Accrue theoretical production into settled amounts; update `last_settled_at` and `capacity_kt`.
 pub fn settle_star_resources(ctx: &ReducerContext, star_x: i32, star_y: i32) -> Result<(), String> {
-    let Some(sys) = generate_star(star_x, star_y) else {
+    let planet_generator_key = generate_planet_key(star_x, star_y);
+    let Some(sys) = generate_star(star_x, star_y, Some(planet_generator_key)) else {
         return Err("No star system at these coordinates".to_string());
     };
 

@@ -37,6 +37,7 @@ Vast is a space simulation MMO built with **SpacetimeDB** (Rust backend) and a *
 ### 1. Adding a New Resource
 1.  **`universe/src/resources.rs`**: Add to `MaterialKind` enum.
 2.  **`universe/src/material_stock.rs`**: Update `material_from_kind_kt`.
+3.  **`universe/src/resources.rs`**: Update `spawn_iron` or `spawn_helium` (or add a new `spawn_` function) and ensure it uses the `key: u64` parameter for salted randomness.
 
 ### 2. Adding a New Building Type
 1.  **`spacetimedb/src/schema.rs`**: Add to `BuildingKind` enum.
@@ -54,7 +55,8 @@ Vast is a space simulation MMO built with **SpacetimeDB** (Rust backend) and a *
 
 ## ⚠️ Critical Patterns & Gotchas
 
--   **Lazy State**: Stars aren't in the DB by default. Use `universe::generator::generate_star(x, y)` to get "static" star data.
+-   **Lazy State**: Stars aren't in the DB by default. Use `universe::generator::generate_star(x, y, key)` to get "static" star data. Note that `key: Option<u64>` is required for planet details (including count).
+-   **Planet Security**: Detailed planet information (count, resources, richness) is gated behind a `planet_generator_key`. This key is generated on the server using a secret and coordinates, and is provided to players via `PlayerPresence` or `ScanResult` rows.
 -   **Resource Settlement**: **ALWAYS** call `settle_star_resources` (in `star_economy.rs`) before modifying `StarSystemStock` or `Building` levels. This ensures "lazy" production since the last interaction is accounted for.
 -   **Scheduled Reducers**: Movement (`order_warp`) uses SpacetimeDB's scheduler to trigger `complete_warp` automatically.
 -   **Bindings**: If you change `spacetimedb/src/schema.rs` or reducers, you **must** regenerate bindings in `vast-bindings/` (usually via `Makefile` or `spacetimedb generate`).

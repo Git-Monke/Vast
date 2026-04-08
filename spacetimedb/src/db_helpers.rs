@@ -12,6 +12,7 @@ use crate::battle::{CombatantId, CombatantResult};
 use crate::constants::{
     MAX_STARTER_SAMPLE_ATTEMPTS, STARTER_DISK_RADIUS_LY, STARTER_LOCAL_GRID, STARTER_LOCAL_HALF,
 };
+use crate::keys::generate_planet_key;
 use crate::{
     Building, BuildingKind, Empire, PlayerPresence, Ship, building, empire, player_presence, ship,
 };
@@ -93,6 +94,7 @@ pub(crate) fn update_player_presence(
                 star_x,
                 star_y,
                 empire_id,
+                planet_generator_key: generate_planet_key(star_x, star_y),
             });
         }
     } else if let Some(row) = existing {
@@ -321,7 +323,7 @@ fn try_find_starter_in_local_grid(
             if star_type != StarType::Red {
                 continue;
             }
-            let Some(sys) = generate_star(gx, gy) else {
+            let Some(sys) = generate_star(gx, gy, Some(generate_planet_key(gx, gy))) else {
                 continue;
             };
             for p in sys.planets {

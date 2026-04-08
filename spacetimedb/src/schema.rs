@@ -111,6 +111,7 @@ pub struct PlayerPresence {
     pub star_x: i32,
     pub star_y: i32,
     pub empire_id: Identity,
+    pub planet_generator_key: u64,
 }
 
 #[spacetimedb::view(accessor = my_ships, public)]
