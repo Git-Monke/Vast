@@ -85,7 +85,7 @@ pub fn place_building(
                 .ok_or_else(|| "Invalid level for this building kind".to_string())?;
             (c, None, lv, Some(mat), None, 0)
         }
-        BuildingKind::Warehouse | BuildingKind::ShipDepot | BuildingKind::Radar => {
+        BuildingKind::Warehouse | BuildingKind::ShipDepot => {
             let lv = level;
             if lv < 1 || lv as usize > MAX_BUILDING_LEVEL {
                 return Err(format!("Level must be 1..={MAX_BUILDING_LEVEL}"));
@@ -99,6 +99,21 @@ pub fn place_building(
             let c = credits_for_leveled_place(kind, lv)
                 .ok_or_else(|| "Invalid level for this building kind".to_string())?;
             (c, None, lv, None, None, 0)
+        }
+        BuildingKind::Radar => {
+            let lv = level;
+            if lv < 1 || lv as usize > MAX_BUILDING_LEVEL {
+                return Err(format!("Level must be 1..={MAX_BUILDING_LEVEL}"));
+            }
+            let need = min_ship_kt_for_level(lv);
+            if max_kt < need {
+                return Err(format!(
+                    "Need a ship of at least {need} kt at this star (largest here: {max_kt} kt)"
+                ));
+            }
+            let c = credits_for_leveled_place(kind, lv)
+                .ok_or_else(|| "Invalid level for this building kind".to_string())?;
+            (c, Some(ctx.sender()), lv, None, None, 0)
         }
         BuildingKind::MilitaryGarrison => {
             let lv = level;

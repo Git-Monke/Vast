@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **SpacetimeDB — scanning:** `complete_scan` now deletes any existing `ScanResult` for the same empire and star location before inserting a new one, ensuring users only fetch and store the latest data for a system.
+- **Galaxy Explorer:** fixed a bug where radar scanning would trigger every frame once a radar was present and a target star ID was entered. Added a "Scan from radar" button with a proper click check to prevent excessive database requests.
 - **Battle simulation (`run_battle`):** units with no damage row were treated as dead, so the battle loop never ran. Missing `CombatantResult` now means **undamaged** (still alive). Unit tests cover damage resolution, defender speed selection, stacked team attack, stalemate, and garrison stats.
 
 ### Added

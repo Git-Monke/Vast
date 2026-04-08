@@ -6,27 +6,29 @@ use std::sync::mpsc;
 
 use eframe::egui;
 use egui::{Color32, Pos2, Sense, Vec2};
-use spacetimedb_sdk::{DbContext, Identity, Table};
 use spacetimedb_sdk::Timestamp;
-use vast_bindings::{
-    buildingQueryTableAccess, collect_star_resources, empireQueryTableAccess, order_warp,
-    place_building, register_empire, sell_ship_cargo, sell_star_warehouse, shipQueryTableAccess,
-    spawn_starter_ship, upgrade_building, star_system_stockQueryTableAccess,
-    Building, BuildingKind, BuildingTableAccess, DbConnection, Empire, EmpireTableAccess, Material,
-    Ship, ShipAttackMode, ShipTableAccess, StarSystemStock, StarSystemStockTableAccess,
-};
+use spacetimedb_sdk::{DbContext, Identity, Table};
+use universe::credits_for_materials_sale;
 use universe::generator::{generate_star, star_info_at, PlanetType, StarSystem, StarType};
 use universe::material_stock::get_amount;
-use universe::credits_for_materials_sale;
+use universe::parse_star_id;
+use universe::settings::{grid_to_ly, COORD_UNITS_PER_LY};
+use universe::ships::{compute_cost, ShipStats};
+use universe::star_display_id;
+use universe::star_location_id;
 use universe::{
     Material as UniverseMaterial, MaterialKind, BASELINE_CREDITS_PER_KT_HELIUM,
     BASELINE_CREDITS_PER_KT_IRON,
 };
-use universe::parse_star_id;
-use universe::star_location_id;
-use universe::settings::{grid_to_ly, COORD_UNITS_PER_LY};
-use universe::star_display_id;
-use universe::ships::{compute_cost, ShipStats};
+use vast_bindings::{
+    buildingQueryTableAccess, collect_star_resources, empireQueryTableAccess, initiate_scan,
+    order_warp, place_building, register_empire, scan_jobQueryTableAccess,
+    scan_resultQueryTableAccess, sell_ship_cargo, sell_star_warehouse, shipQueryTableAccess,
+    spawn_starter_ship, star_system_stockQueryTableAccess, upgrade_building, Building,
+    BuildingKind, BuildingTableAccess, DbConnection, Empire, EmpireTableAccess, Material,
+    ScanInitiator, ScanJob, ScanJobTableAccess, ScanResult, ScanResultTableAccess, Ship,
+    ShipAttackMode, ShipTableAccess, StarSystemStock, StarSystemStockTableAccess,
+};
 
 const ZOOM_MIN: f64 = 0.1; // pixels per light-year (max zoom out)
 const ZOOM_MAX: f64 = 400.0; // pixels per light-year (max zoom in)
@@ -274,6 +276,12 @@ struct ExplorerApp {
     star_panel_cache_time_secs: f64,
     star_panel_cached_buildings: Vec<Building>,
     star_panel_cached_stock: Option<StarSystemStock>,
+    /// Scan targets from the text input
+    scan_target_star_id: String,
+    /// Active scan jobs for display
+    my_scan_jobs: Vec<ScanJob>,
+    /// Recent scan results
+    my_scan_results: Vec<ScanResult>,
 }
 
 impl eframe::App for ExplorerApp {
@@ -361,6 +369,9 @@ impl ExplorerApp {
             star_panel_cache_time_secs: 0.0,
             star_panel_cached_buildings: Vec::new(),
             star_panel_cached_stock: None,
+            scan_target_star_id: String::new(),
+            my_scan_jobs: Vec::new(),
+            my_scan_results: Vec::new(),
         };
         app
     }
@@ -400,6 +411,8 @@ impl ExplorerApp {
                     .add_query(|q| q.from.building())
                     .add_query(|q| q.from.ship())
                     .add_query(|q| q.from.star_system_stock())
+                    .add_query(|q| q.from.scan_job())
+                    .add_query(|q| q.from.scan_result())
                     .subscribe();
             })
             .on_connect_error(|_ctx, e| {
@@ -441,6 +454,18 @@ impl ExplorerApp {
         for s in conn.db().ship().iter() {
             if s.owner == id {
                 self.my_ships.push(s);
+            }
+        }
+        self.my_scan_jobs.clear();
+        for j in conn.db().scan_job().iter() {
+            if j.empire_id == id {
+                self.my_scan_jobs.push(j);
+            }
+        }
+        self.my_scan_results.clear();
+        for r in conn.db().scan_result().iter() {
+            if r.empire_id == id {
+                self.my_scan_results.push(r);
             }
         }
         if !self.did_center_camera {
@@ -811,6 +836,140 @@ impl ExplorerApp {
 
                     let buildings_at_star: &[Building] = &self.star_panel_cached_buildings;
                     let me = self.conn.as_ref().and_then(|c| c.try_identity());
+
+                    // ── Scanning ────────────────────────────────────────────────
+                    ui.separator();
+                    ui.heading("Scanning");
+                    let my_radars: Vec<&Building> = buildings_at_star
+                        .iter()
+                        .filter(|b| b.kind == BuildingKind::Radar && b.owner == me)
+                        .collect();
+                    let ships_here_for_scan: Vec<&Ship> = self
+                        .my_ships
+                        .iter()
+                        .filter(|s| !s.in_transit && s.star_x == sys.x && s.star_y == sys.y)
+                        .collect();
+                    
+                    if my_radars.is_empty() && ships_here_for_scan.is_empty() {
+                        ui.label(egui::RichText::new("No scanners at this star.")
+                            .weak());
+                    } else {
+                        ui.label("Enter a destination Star ID to scan:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.scan_target_star_id)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("e.g. AA-1000-1000 or !500000,-300000"),
+                        );
+                        
+                        if !my_radars.is_empty() {
+                            ui.label(format!("Radars at this star: {}", my_radars.len()));
+                            for r in &my_radars {
+                                ui.label(format!("  Radar L{} (range: {} ly)", 
+                                    r.level, 
+                                    building_economy::RADAR_MAX_LY_FOR_LEVEL[(r.level - 1) as usize]
+                                ));
+                            }
+                        }
+                        
+                        if !ships_here_for_scan.is_empty() {
+                            ui.label(format!("Ships ready to scan: {}", ships_here_for_scan.len()));
+                            for s in &ships_here_for_scan {
+                                ui.label(format!("  Ship #{} (radar range: {} ly)", 
+                                    s.id, 
+                                    s.stats.radar_ly
+                                ));
+                            }
+                        }
+                        
+                        ui.horizontal(|ui| {
+                            let can_scan = !self.scan_target_star_id.is_empty() 
+                                && (self.selected_ship_id.is_some() || !my_radars.is_empty());
+                            if ui.add_enabled(can_scan, egui::Button::new("Scan from ship")).clicked() {
+                                if let Some(ship_id) = self.selected_ship_id {
+                                    if let Some((dx, dy)) = parse_star_id(self.scan_target_star_id.trim()) {
+                                        if let Some(conn) = &self.conn {
+                                            let tx = self.toast_tx.clone();
+                                            if let Err(e) = conn.reducers().initiate_scan_then(
+                                                ScanInitiator::Ship,
+                                                ship_id,
+                                                dx,
+                                                dy,
+                                                move |_, res| {
+                                                    let msg = match res {
+                                                        Ok(Ok(())) => "Scan initiated.".to_string(),
+                                                        Ok(Err(err)) => format!("Scan: {err}"),
+                                                        Err(err) => format!("Scan failed: {err:?}"),
+                                                    };
+                                                    let _ = tx.send(msg);
+                                                },
+                                            ) {
+                                                self.toast_message = Some(format!("Could not send scan: {e:?}"));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if ui.add_enabled(can_scan && !my_radars.is_empty(), egui::Button::new("Scan from radar")).clicked() {
+                                if let Some((dx, dy)) = parse_star_id(self.scan_target_star_id.trim()) {
+                                    if let Some(conn) = &self.conn {
+                                        let tx = self.toast_tx.clone();
+                                        let radar_id = my_radars[0].id;
+                                        if let Err(e) = conn.reducers().initiate_scan_then(
+                                            ScanInitiator::Radar,
+                                            radar_id,
+                                            dx,
+                                            dy,
+                                            move |_, res| {
+                                                let msg = match res {
+                                                    Ok(Ok(())) => "Radar scan initiated.".to_string(),
+                                                    Ok(Err(err)) => format!("Radar scan: {err}"),
+                                                    Err(err) => format!("Radar scan failed: {err:?}"),
+                                                };
+                                                let _ = tx.send(msg);
+                                            },
+                                        ) {
+                                            self.toast_message = Some(format!("Could not send radar scan: {e:?}"));
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    
+                    let active_jobs: Vec<&ScanJob> = self.my_scan_jobs.iter()
+                        .filter(|j| j.initiator_id == self.selected_ship_id.unwrap_or(0) 
+                            || (matches!(j.scan_initiator, ScanInitiator::Radar) 
+                                && my_radars.iter().any(|r| r.id == j.initiator_id)))
+                        .collect();
+                    if !active_jobs.is_empty() {
+                        ui.label(egui::RichText::new("Active scans:").strong());
+                        for job in &active_jobs {
+                            let dest = format!("({}, {})", job.to_star_x, job.to_star_y);
+                            ui.label(format!("  → {} ly", dest));
+                        }
+                    }
+                    
+                    if !self.my_scan_results.is_empty() {
+                        if ui.button("View latest scan result").clicked() {
+                            if let Some(result) = self.my_scan_results.last() {
+                                let mut info = format!(
+                                    "Scan at ({}, {}): {} planets, {} ships. ",
+                                    result.star_x, result.star_y,
+                                    result.planets.len(),
+                                    result.docked_ships.len()
+                                );
+                                for planet in &result.planets {
+                                    info.push_str(&format!(
+                                        "Planet {}: {} buildings. ",
+                                        planet.index,
+                                        planet.buildlings.len()
+                                    ));
+                                }
+                                self.toast_message = Some(info);
+                            }
+                        }
+                    }
 
                             for p in &sys.planets {
                                 ui.add_space(4.0);
@@ -1394,6 +1553,7 @@ impl ExplorerApp {
                                             BuildingKind::MilitaryGarrison,
                                             BuildingKind::SalesDepot,
                                             BuildingKind::ShipDepot,
+                                            BuildingKind::Radar,
                                         ] {
                                             ui.selectable_value(
                                                 &mut self.build_kind,

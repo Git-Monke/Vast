@@ -1,7 +1,11 @@
-use spacetimedb::{Identity, ReducerContext, ScheduleAt, SpacetimeType};
-use universe::{Material, ShipStats, generator::PlanetType};
+use spacetimedb::{Identity, ReducerContext, ScheduleAt, SpacetimeType, Table, TimeDuration};
+use universe::{
+    Material, ShipStats,
+    generator::{PlanetType, generate_star, star_info_at},
+    settings::distance_between_cells_ly,
+};
 
-use crate::BuildingKind;
+use crate::{BuildingKind, building, buildling_settings::RADAR_MAX_LY_FOR_LEVEL, ship};
 
 #[derive(SpacetimeType, Clone, Copy, Debug, PartialEq)]
 pub enum ScanInitiator {
@@ -10,7 +14,7 @@ pub enum ScanInitiator {
 }
 
 #[derive(SpacetimeType)]
-struct ScannedBuildling {
+pub(crate) struct ScannedBuildling {
     pub kind: BuildingKind,
     pub level: u32,
     pub degradation_percent: f32,
@@ -21,7 +25,7 @@ struct ScannedBuildling {
 }
 
 #[derive(SpacetimeType)]
-struct ScannedPlanet {
+pub(crate) struct ScannedPlanet {
     pub index: u8,
     pub name: String,
     pub temperature_k: f64,
@@ -42,7 +46,8 @@ pub struct ScannedDockedShip {
 /// One-shot timer to complete an in-flight warp at `arrive_at`.
 #[spacetimedb::table(
     accessor = scan_job,
-    scheduled(complete_scan)
+    scheduled(complete_scan),
+    public
 )]
 pub struct ScanJob {
     #[primary_key]
@@ -59,7 +64,7 @@ pub struct ScanJob {
     pub to_star_y: i32,
 }
 
-#[spacetimedb::table(accessor = scan_result)]
+#[spacetimedb::table(accessor = scan_result, public)]
 pub struct ScanResult {
     #[primary_key]
     #[auto_inc]
@@ -80,10 +85,162 @@ pub fn initiate_scan(
     to_star_x: i32,
     to_star_y: i32,
 ) -> Result<(), String> {
+    let empire_id = ctx.sender();
+
+    let (init_star_x, init_star_y, max_scan_ly) = match scan_initiator {
+        ScanInitiator::Radar => {
+            let b = ctx
+                .db
+                .building()
+                .id()
+                .find(&initiator_id)
+                .ok_or_else(|| "Radar not found".to_string())?;
+            if b.kind != BuildingKind::Radar {
+                return Err("Initiator is not a radar".to_string());
+            }
+            if b.owner != Some(empire_id) {
+                return Err("Not your radar".to_string());
+            }
+            let max_ly = RADAR_MAX_LY_FOR_LEVEL[(b.level - 1) as usize];
+            (b.star_x, b.star_y, max_ly)
+        }
+        ScanInitiator::Ship => {
+            let s = ctx
+                .db
+                .ship()
+                .id()
+                .find(&initiator_id)
+                .ok_or_else(|| "Ship not found".to_string())?;
+            if s.owner != empire_id {
+                return Err("Not your ship".to_string());
+            }
+            if s.in_transit {
+                return Err("Ship is in transit".to_string());
+            }
+            (s.star_x, s.star_y, s.stats.radar_ly as f64)
+        }
+    };
+
+    if ctx
+        .db
+        .scan_job()
+        .iter()
+        .any(|j| j.scan_initiator == scan_initiator && j.initiator_id == initiator_id)
+    {
+        return Err("Initiator already has an active scan job".to_string());
+    }
+
+    if init_star_x == to_star_x && init_star_y == to_star_y {
+        return Err("Already at destination".to_string());
+    }
+
+    if star_info_at(to_star_x, to_star_y).is_none() {
+        return Err("No star at destination".to_string());
+    }
+
+    let dist_ly = distance_between_cells_ly(init_star_x, init_star_y, to_star_x, to_star_y);
+    if dist_ly > max_scan_ly {
+        return Err(format!(
+            "Target is {:.2} ly away; max scan range is {:.2} ly",
+            dist_ly, max_scan_ly
+        ));
+    }
+
+    let secs = (dist_ly / 10.0).ceil() as i64;
+    let scheduled_at = (ctx.timestamp + TimeDuration::from_micros(secs * 1_000_000)).into();
+
+    let ship_id = if matches!(scan_initiator, ScanInitiator::Ship) {
+        initiator_id
+    } else {
+        0
+    };
+
+    ctx.db.scan_job().insert(ScanJob {
+        scheduled_id: 0,
+        scheduled_at,
+        empire_id,
+        scan_initiator,
+        initiator_id,
+        ship_id,
+        to_star_x,
+        to_star_y,
+    });
+
     Ok(())
 }
 
 #[spacetimedb::reducer]
 pub fn complete_scan(ctx: &ReducerContext, job: ScanJob) -> Result<(), String> {
+    // Delete existing scan results for this empire and location so we only keep the latest.
+    let old_results: Vec<u64> = ctx
+        .db
+        .scan_result()
+        .iter()
+        .filter(|r| {
+            r.empire_id == job.empire_id && r.star_x == job.to_star_x && r.star_y == job.to_star_y
+        })
+        .map(|r| r.id)
+        .collect();
+
+    for id in old_results {
+        ctx.db.scan_result().id().delete(&id);
+    }
+
+    let sys = generate_star(job.to_star_x, job.to_star_y)
+        .ok_or_else(|| "No star system at destination".to_string())?;
+
+    let planets = sys
+        .planets
+        .iter()
+        .map(|p| {
+            let buildlings = ctx
+                .db
+                .building()
+                .building_by_planet_location()
+                .filter((job.to_star_x, job.to_star_y, p.index))
+                .map(|b| ScannedBuildling {
+                    kind: b.kind,
+                    level: b.level,
+                    degradation_percent: b.degradation_percent,
+                    mining_material: b.mining_material.clone(),
+                    owner: b.owner,
+                    health: b.health,
+                })
+                .collect();
+
+            ScannedPlanet {
+                index: p.index,
+                name: p.name.clone(),
+                temperature_k: p.temperature_k,
+                planet_type: p.planet_type,
+                size: p.size,
+                richness: p.richness,
+                resources: p.resources.clone(),
+                buildlings,
+            }
+        })
+        .collect();
+
+    let docked_ships = ctx
+        .db
+        .ship()
+        .ship_by_docked_star()
+        .filter((false, job.to_star_x, job.to_star_y))
+        .map(|s| ScannedDockedShip {
+            owner: s.owner,
+            stats: s.stats,
+            health: s.health,
+        })
+        .collect();
+
+    ctx.db.scan_result().insert(ScanResult {
+        id: 0,
+        empire_id: job.empire_id,
+        star_x: job.to_star_x,
+        star_y: job.to_star_y,
+        planets,
+        docked_ships,
+    });
+
     Ok(())
 }

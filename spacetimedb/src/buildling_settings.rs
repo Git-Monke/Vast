@@ -87,3 +87,7 @@ pub const GARRISON_STATS_FOR_LEVEL: [GarrisonStats; MAX_BUILDING_LEVEL] = [
         health: 20000,
     }, // 12
 ];
+
+pub const RADAR_MAX_LY_FOR_LEVEL: [f64; MAX_BUILDING_LEVEL] = [
+    5.0, 15.0, 30.0, 60.0, 120.0, 240.0, 480.0, 720.0, 960.0, 1200.0, 1800.0, 2400.0,
+];

@@ -13,12 +13,23 @@ pub mod collect_star_resources_reducer;
 pub mod empire_table;
 pub mod empire_type;
 pub mod execute_battle_reducer;
+pub mod initiate_scan_reducer;
 pub mod material_type;
 pub mod order_warp_reducer;
 pub mod place_building_reducer;
+pub mod planet_type_type;
 pub mod register_empire_reducer;
+pub mod scan_initiator_type;
+pub mod scan_job_table;
+pub mod scan_job_type;
+pub mod scan_result_table;
+pub mod scan_result_type;
+pub mod scanned_buildling_type;
+pub mod scanned_docked_ship_type;
+pub mod scanned_planet_type;
 pub mod sell_ship_cargo_reducer;
 pub mod sell_star_warehouse_reducer;
+pub mod set_ship_attack_mode_reducer;
 pub mod ship_attack_mode_type;
 pub mod ship_stats_type;
 pub mod ship_table;
@@ -36,12 +47,23 @@ pub use collect_star_resources_reducer::collect_star_resources;
 pub use empire_table::*;
 pub use empire_type::Empire;
 pub use execute_battle_reducer::execute_battle;
+pub use initiate_scan_reducer::initiate_scan;
 pub use material_type::Material;
 pub use order_warp_reducer::order_warp;
 pub use place_building_reducer::place_building;
+pub use planet_type_type::PlanetType;
 pub use register_empire_reducer::register_empire;
+pub use scan_initiator_type::ScanInitiator;
+pub use scan_job_table::*;
+pub use scan_job_type::ScanJob;
+pub use scan_result_table::*;
+pub use scan_result_type::ScanResult;
+pub use scanned_buildling_type::ScannedBuildling;
+pub use scanned_docked_ship_type::ScannedDockedShip;
+pub use scanned_planet_type::ScannedPlanet;
 pub use sell_ship_cargo_reducer::sell_ship_cargo;
 pub use sell_star_warehouse_reducer::sell_star_warehouse;
+pub use set_ship_attack_mode_reducer::set_ship_attack_mode;
 pub use ship_attack_mode_type::ShipAttackMode;
 pub use ship_stats_type::ShipStats;
 pub use ship_table::*;
@@ -67,6 +89,12 @@ pub enum Reducer {
     ExecuteBattle {
         star_x: u32,
         star_y: u32,
+    },
+    InitiateScan {
+        scan_initiator: ScanInitiator,
+        initiator_id: u64,
+        to_star_x: i32,
+        to_star_y: i32,
     },
     OrderWarp {
         ship_id: u64,
@@ -94,6 +122,10 @@ pub enum Reducer {
         ship_id: u64,
         amounts: Vec<Material>,
     },
+    SetShipAttackMode {
+        ship_id: u64,
+        attack_mode: ShipAttackMode,
+    },
     SpawnStarterShip,
     UpgradeBuilding {
         building_id: u64,
@@ -110,11 +142,13 @@ impl __sdk::Reducer for Reducer {
         match self {
             Reducer::CollectStarResources { .. } => "collect_star_resources",
             Reducer::ExecuteBattle { .. } => "execute_battle",
+            Reducer::InitiateScan { .. } => "initiate_scan",
             Reducer::OrderWarp { .. } => "order_warp",
             Reducer::PlaceBuilding { .. } => "place_building",
             Reducer::RegisterEmpire { .. } => "register_empire",
             Reducer::SellShipCargo { .. } => "sell_ship_cargo",
             Reducer::SellStarWarehouse { .. } => "sell_star_warehouse",
+            Reducer::SetShipAttackMode { .. } => "set_ship_attack_mode",
             Reducer::SpawnStarterShip => "spawn_starter_ship",
             Reducer::UpgradeBuilding { .. } => "upgrade_building",
             _ => unreachable!(),
@@ -135,6 +169,17 @@ impl __sdk::Reducer for Reducer {
                     star_y: star_y.clone(),
                 })
             }
+            Reducer::InitiateScan {
+                scan_initiator,
+                initiator_id,
+                to_star_x,
+                to_star_y,
+            } => __sats::bsatn::to_vec(&initiate_scan_reducer::InitiateScanArgs {
+                scan_initiator: scan_initiator.clone(),
+                initiator_id: initiator_id.clone(),
+                to_star_x: to_star_x.clone(),
+                to_star_y: to_star_y.clone(),
+            }),
             Reducer::OrderWarp {
                 ship_id,
                 dest_star_x,
@@ -180,6 +225,13 @@ impl __sdk::Reducer for Reducer {
                     amounts: amounts.clone(),
                 })
             }
+            Reducer::SetShipAttackMode {
+                ship_id,
+                attack_mode,
+            } => __sats::bsatn::to_vec(&set_ship_attack_mode_reducer::SetShipAttackModeArgs {
+                ship_id: ship_id.clone(),
+                attack_mode: attack_mode.clone(),
+            }),
             Reducer::SpawnStarterShip => {
                 __sats::bsatn::to_vec(&spawn_starter_ship_reducer::SpawnStarterShipArgs {})
             }
@@ -201,6 +253,8 @@ impl __sdk::Reducer for Reducer {
 pub struct DbUpdate {
     building: __sdk::TableUpdate<Building>,
     empire: __sdk::TableUpdate<Empire>,
+    scan_job: __sdk::TableUpdate<ScanJob>,
+    scan_result: __sdk::TableUpdate<ScanResult>,
     ship: __sdk::TableUpdate<Ship>,
     star_system_stock: __sdk::TableUpdate<StarSystemStock>,
 }
@@ -217,6 +271,12 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
                 "empire" => db_update
                     .empire
                     .append(empire_table::parse_table_update(table_update)?),
+                "scan_job" => db_update
+                    .scan_job
+                    .append(scan_job_table::parse_table_update(table_update)?),
+                "scan_result" => db_update
+                    .scan_result
+                    .append(scan_result_table::parse_table_update(table_update)?),
                 "ship" => db_update
                     .ship
                     .append(ship_table::parse_table_update(table_update)?),
@@ -255,6 +315,12 @@ impl __sdk::DbUpdate for DbUpdate {
         diff.empire = cache
             .apply_diff_to_table::<Empire>("empire", &self.empire)
             .with_updates_by_pk(|row| &row.identity);
+        diff.scan_job = cache
+            .apply_diff_to_table::<ScanJob>("scan_job", &self.scan_job)
+            .with_updates_by_pk(|row| &row.scheduled_id);
+        diff.scan_result = cache
+            .apply_diff_to_table::<ScanResult>("scan_result", &self.scan_result)
+            .with_updates_by_pk(|row| &row.id);
         diff.ship = cache
             .apply_diff_to_table::<Ship>("ship", &self.ship)
             .with_updates_by_pk(|row| &row.id);
@@ -273,6 +339,12 @@ impl __sdk::DbUpdate for DbUpdate {
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "empire" => db_update
                     .empire
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "scan_job" => db_update
+                    .scan_job
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "scan_result" => db_update
+                    .scan_result
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "ship" => db_update
                     .ship
@@ -299,6 +371,12 @@ impl __sdk::DbUpdate for DbUpdate {
                 "empire" => db_update
                     .empire
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "scan_job" => db_update
+                    .scan_job
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "scan_result" => db_update
+                    .scan_result
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "ship" => db_update
                     .ship
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
@@ -322,6 +400,8 @@ impl __sdk::DbUpdate for DbUpdate {
 pub struct AppliedDiff<'r> {
     building: __sdk::TableAppliedDiff<'r, Building>,
     empire: __sdk::TableAppliedDiff<'r, Empire>,
+    scan_job: __sdk::TableAppliedDiff<'r, ScanJob>,
+    scan_result: __sdk::TableAppliedDiff<'r, ScanResult>,
     ship: __sdk::TableAppliedDiff<'r, Ship>,
     star_system_stock: __sdk::TableAppliedDiff<'r, StarSystemStock>,
     __unused: std::marker::PhantomData<&'r ()>,
@@ -339,6 +419,8 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
     ) {
         callbacks.invoke_table_row_callbacks::<Building>("building", &self.building, event);
         callbacks.invoke_table_row_callbacks::<Empire>("empire", &self.empire, event);
+        callbacks.invoke_table_row_callbacks::<ScanJob>("scan_job", &self.scan_job, event);
+        callbacks.invoke_table_row_callbacks::<ScanResult>("scan_result", &self.scan_result, event);
         callbacks.invoke_table_row_callbacks::<Ship>("ship", &self.ship, event);
         callbacks.invoke_table_row_callbacks::<StarSystemStock>(
             "star_system_stock",
@@ -1007,9 +1089,17 @@ impl __sdk::SpacetimeModule for RemoteModule {
     fn register_tables(client_cache: &mut __sdk::ClientCache<Self>) {
         building_table::register_table(client_cache);
         empire_table::register_table(client_cache);
+        scan_job_table::register_table(client_cache);
+        scan_result_table::register_table(client_cache);
         ship_table::register_table(client_cache);
         star_system_stock_table::register_table(client_cache);
     }
-    const ALL_TABLE_NAMES: &'static [&'static str] =
-        &["building", "empire", "ship", "star_system_stock"];
+    const ALL_TABLE_NAMES: &'static [&'static str] = &[
+        "building",
+        "empire",
+        "scan_job",
+        "scan_result",
+        "ship",
+        "star_system_stock",
+    ];
 }

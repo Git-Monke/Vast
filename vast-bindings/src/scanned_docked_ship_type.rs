@@ -4,23 +4,16 @@
 #![allow(unused, clippy::all)]
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
+use super::ship_stats_type::ShipStats;
+
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
-#[derive(Copy, Eq, Hash)]
-pub enum BuildingKind {
-    MiningDepot,
-
-    Warehouse,
-
-    MilitaryGarrison,
-
-    SalesDepot,
-
-    ShipDepot,
-
-    Radar,
+pub struct ScannedDockedShip {
+    pub owner: __sdk::Identity,
+    pub stats: ShipStats,
+    pub health: u32,
 }
 
-impl __sdk::InModule for BuildingKind {
+impl __sdk::InModule for ScannedDockedShip {
     type Module = super::RemoteModule;
 }

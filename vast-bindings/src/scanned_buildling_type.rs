@@ -4,23 +4,20 @@
 #![allow(unused, clippy::all)]
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
+use super::building_kind_type::BuildingKind;
+use super::material_type::Material;
+
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
-#[derive(Copy, Eq, Hash)]
-pub enum BuildingKind {
-    MiningDepot,
-
-    Warehouse,
-
-    MilitaryGarrison,
-
-    SalesDepot,
-
-    ShipDepot,
-
-    Radar,
+pub struct ScannedBuildling {
+    pub kind: BuildingKind,
+    pub level: u32,
+    pub degradation_percent: f32,
+    pub mining_material: Option<Material>,
+    pub owner: Option<__sdk::Identity>,
+    pub health: u32,
 }
 
-impl __sdk::InModule for BuildingKind {
+impl __sdk::InModule for ScannedBuildling {
     type Module = super::RemoteModule;
 }
